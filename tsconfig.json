@@ -17,15 +17,7 @@
 		"forceConsistentCasingInFileNames": true,
 		"noUnusedLocals": true,
 		"noUnusedParameters": true,
-		"noFallthroughCasesInSwitch": true,
-		"paths": {
-			"@mariozechner/pi-coding-agent": [
-				"./node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts"
-			],
-			"@mariozechner/pi-tui": [
-				"./node_modules/@earendil-works/pi-tui/dist/index.d.ts"
-			]
-		}
+		"noFallthroughCasesInSwitch": true
 	},
 	"include": [
 		"src/**/*.ts",

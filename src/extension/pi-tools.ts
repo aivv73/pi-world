@@ -1,0 +1,182 @@
+/**
+ * pi's builtin tools, mounted inside the evaluator.
+ *
+ * The session runs with pi's tools disabled — the model's only tool is
+ * `execute`. But the tool implementations themselves (read, bash, edit,
+ * write, grep, find, ls) are exported by the pi package as plain
+ * ToolDefinitions, so the host can mount them behind the guest bridge: cells
+ * call `await tools.read({ path })` and the definition executes host-side
+ * with the cell's abort signal.
+ *
+ * Arguments are validated against each tool's TypeBox schema before execute
+ * runs, and a validation failure teaches: it names what was wrong and shows
+ * the expected signature. Unknown tool names suggest the nearest real one.
+ * Image blocks cannot cross the JSON protocol as pixels a model could see, so
+ * they are held host-side and forwarded into the cell's tool-result content;
+ * the guest value reports how many.
+ */
+
+import {
+	createBashToolDefinition,
+	createEditToolDefinition,
+	createFindToolDefinition,
+	createGrepToolDefinition,
+	createLsToolDefinition,
+	createReadToolDefinition,
+	createWriteToolDefinition,
+} from "@mariozechner/pi-coding-agent";
+import { Value } from "typebox/value";
+import type { HostRequestHandlers } from "../engine/index.js";
+
+/** Structural view of a ToolDefinition; keeps this module decoupled from pi's generics. */
+interface MountedTool {
+	name: string;
+	description: string;
+	parameters: {
+		required?: string[];
+		properties?: Record<string, { type?: string; description?: string }>;
+	};
+	execute(
+		toolCallId: string,
+		params: unknown,
+		signal: AbortSignal | undefined,
+		onUpdate: undefined,
+		ctx: undefined,
+	): Promise<{ content: ContentBlock[]; details: unknown }>;
+}
+
+export interface ContentBlock {
+	type: string;
+	text?: string;
+	data?: string;
+	mimeType?: string;
+}
+
+export interface ImageBlock {
+	type: "image";
+	data: string;
+	mimeType: string;
+}
+
+export interface PiToolsHost {
+	handlers: HostRequestHandlers;
+	/** Image blocks produced by bridged calls since the last drain. */
+	drainImages(): ImageBlock[];
+	/** One line per tool: signature plus first sentence of its description. */
+	describe(): string[];
+}
+
+function buildDefinitions(cwd: string): Map<string, MountedTool> {
+	const defs = [
+		createReadToolDefinition(cwd),
+		createBashToolDefinition(cwd),
+		createEditToolDefinition(cwd),
+		createWriteToolDefinition(cwd),
+		createGrepToolDefinition(cwd),
+		createFindToolDefinition(cwd),
+		createLsToolDefinition(cwd),
+	] as unknown as MountedTool[];
+	return new Map(defs.map((def) => [def.name, def]));
+}
+
+/** `read({ path: string, offset?: number, limit?: number })` — from the schema, so it never drifts. */
+export function toolSignature(def: MountedTool): string {
+	const required = new Set(def.parameters.required ?? []);
+	const params = Object.entries(def.parameters.properties ?? {})
+		.map(([name, prop]) => `${name}${required.has(name) ? "" : "?"}: ${prop.type ?? "unknown"}`)
+		.join(", ");
+	return `${def.name}({ ${params} })`;
+}
+
+function firstSentence(text: string): string {
+	const line = text.split("\n")[0] ?? "";
+	const period = line.indexOf(". ");
+	return period > 0 ? line.slice(0, period + 1) : line;
+}
+
+function levenshtein(a: string, b: string): number {
+	const rows = a.length + 1;
+	const cols = b.length + 1;
+	const dist = Array.from({ length: rows }, (_, i) => {
+		const row = new Array<number>(cols).fill(0);
+		row[0] = i;
+		return row;
+	});
+	for (let j = 0; j < cols; j++) dist[0]![j] = j;
+	for (let i = 1; i < rows; i++) {
+		for (let j = 1; j < cols; j++) {
+			const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+			dist[i]![j] = Math.min(dist[i - 1]![j]! + 1, dist[i]![j - 1]! + 1, dist[i - 1]![j - 1]! + cost);
+		}
+	}
+	return dist[rows - 1]![cols - 1]!;
+}
+
+function nearestName(name: string, names: Iterable<string>): string | undefined {
+	let best: { name: string; distance: number } | undefined;
+	for (const candidate of names) {
+		const distance = levenshtein(name.toLowerCase(), candidate);
+		if (!best || distance < best.distance) best = { name: candidate, distance };
+	}
+	return best && best.distance <= 3 ? best.name : undefined;
+}
+
+function validationError(def: MountedTool, args: unknown): string | undefined {
+	if (Value.Check(def.parameters as never, args)) return undefined;
+	const problems = [...Value.Errors(def.parameters as never, args)]
+		.slice(0, 3)
+		.map((error) => (error.instancePath ? `${error.instancePath}: ${error.message}` : error.message))
+		.join("; ");
+	return `tools.${def.name}: invalid arguments — ${problems}. Expected: ${toolSignature(def)}`;
+}
+
+export function createPiToolsHost(options: { cwd: string }): PiToolsHost {
+	const definitions = buildDefinitions(options.cwd);
+	let pendingImages: ImageBlock[] = [];
+	let callCounter = 0;
+
+	const handlers: HostRequestHandlers = {
+		"tools.call": async (payload, context) => {
+			const name = typeof payload.name === "string" ? payload.name : "";
+			const def = definitions.get(name);
+			if (!def) {
+				const suggestion = nearestName(name, definitions.keys());
+				const available = [...definitions.keys()].join(", ");
+				throw new Error(
+					`Unknown tool "${name}".${suggestion ? ` Did you mean "${suggestion}"?` : ""} Available: ${available}.`,
+				);
+			}
+			const args = payload.args && typeof payload.args === "object" ? payload.args : {};
+			const invalid = validationError(def, args);
+			if (invalid) throw new Error(invalid);
+
+			const result = await def.execute(`rlm-tool-${++callCounter}`, args, context?.signal, undefined, undefined);
+			const text = result.content
+				.filter((block) => block.type === "text" && typeof block.text === "string")
+				.map((block) => block.text)
+				.join("\n");
+			const images = result.content.filter(
+				(block): block is ImageBlock =>
+					block.type === "image" && typeof block.data === "string" && typeof block.mimeType === "string",
+			);
+			pendingImages.push(...images);
+			return {
+				text,
+				images: images.length,
+				details: (result.details ?? null) as Record<string, unknown> | null,
+			} as Record<string, unknown>;
+		},
+	};
+
+	return {
+		handlers,
+		drainImages() {
+			const drained = pendingImages;
+			pendingImages = [];
+			return drained;
+		},
+		describe() {
+			return [...definitions.values()].map((def) => `tools.${toolSignature(def)} — ${firstSentence(def.description)}`);
+		},
+	};
+}

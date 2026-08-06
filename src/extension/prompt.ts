@@ -16,6 +16,8 @@ export interface RlmPromptOptions {
 	parentAgent?: string;
 	allowRecursion?: boolean;
 	contextFiles?: Array<{ path: string; content: string }>;
+	/** One line per mounted host tool, from the bridge's own schemas. */
+	toolSummaries?: string[];
 }
 
 const EVALUATOR_CONTROL_PROMPT = [
@@ -35,6 +37,20 @@ const EVALUATOR_CONTROL_PROMPT = [
 	"",
 	"The final expression of a cell is rendered as its result. Prefer many small cells over one large cell: execute, observe, then continue.",
 ].join("\n");
+
+function buildHostToolsSection(summaries: readonly string[]): string {
+	return [
+		"# Host tools",
+		"",
+		"pi's file tools are mounted in the evaluator as async functions on `tools`. Each resolves to `{ text, images, details }`: `text` is the tool's text output, `images` counts image blocks the host attaches to this cell's result (you will see them), `details` is the tool's structured data.",
+		"",
+		...summaries,
+		"",
+		"Prefer `tools.edit({ path, oldText, newText })` over rewriting files with Bun.write: it fails loudly when oldText is stale instead of silently reverting content you have not seen.",
+		"Prefer `tools.read({ path })` over `Bun.file(path).text()` for source files and anything that might be an image: it adds line numbers for precise edits, enforces size caps, and renders images so you can see them.",
+		"`Bun.$` remains the way to run shell commands; `tools.bash` exists mainly for parity and timeouts.",
+	].join("\n");
+}
 
 function buildChildDoctrine(options: RlmPromptOptions): string | undefined {
 	const depth = options.depth ?? 0;
@@ -88,6 +104,10 @@ export function buildRlmTsPrompt(options: RlmPromptOptions): string {
 	}
 
 	parts.push("", EVALUATOR_CONTROL_PROMPT);
+
+	if (options.toolSummaries && options.toolSummaries.length > 0) {
+		parts.push("", buildHostToolsSection(options.toolSummaries));
+	}
 
 	if (options.contextFiles && options.contextFiles.length > 0) {
 		parts.push("", "# Project Context", "", "Project-specific instructions and guidelines:", "");

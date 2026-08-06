@@ -229,6 +229,31 @@ const GUARDED_BUN = new Proxy(Bun, {
 	},
 });
 
+/**
+ * Host-mounted pi tools. The list is fixed by the host adapter; `call` exists
+ * for forward compatibility and gets the same teaching errors for unknown
+ * names. Each method resolves to { text, images, details } — text is the
+ * joined text blocks, images counts blocks the host forwards into the cell's
+ * result so the model can see them.
+ */
+const TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
+
+interface ToolReply extends Record<string, unknown> {
+	text: string;
+	images: number;
+	details: unknown;
+}
+
+const TOOLS_HANDLE: Record<string, unknown> = {
+	async call(name: string, args: Record<string, unknown> = {}): Promise<ToolReply> {
+		return (await hostRequest("tools.call", { name, args })) as ToolReply;
+	},
+};
+for (const name of TOOL_NAMES) {
+	TOOLS_HANDLE[name] = async (args: Record<string, unknown> = {}): Promise<ToolReply> =>
+		(await hostRequest("tools.call", { name, args })) as ToolReply;
+}
+
 const RLM_HANDLE = {
 	hostRequest,
 	async run(prompt: string, kwargs: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
@@ -252,6 +277,8 @@ function installBootstrapBindings(): void {
 	// a version whose shell refuses nullish interpolation.
 	namespace.Bun = GUARDED_BUN;
 	INTERNAL_BINDINGS.set("Bun", GUARDED_BUN);
+	namespace.tools = TOOLS_HANDLE;
+	INTERNAL_BINDINGS.set("tools", TOOLS_HANDLE);
 }
 
 installBootstrapBindings();

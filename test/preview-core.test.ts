@@ -173,6 +173,35 @@ describe("previewCell: file effects and fetch", () => {
 	]);
 });
 
+describe("previewCell: bridged host tools", () => {
+	run([
+		{
+			name: "tools.read previews as a read of its path",
+			code: 'const reply = await tools.read({ path: "src/engine/index.ts" });\nreply.text.length',
+			kind: "ts",
+			text: "read src/engine/index.ts",
+		},
+		{
+			name: "tools.edit previews as an edit of its path",
+			code: 'await tools.edit({ path: "config.ts", edits: [{ oldText: "a", newText: "b" }] });',
+			kind: "ts",
+			text: "edit config.ts",
+		},
+		{
+			name: "tools.write outranks the const above it",
+			code: 'const body = render();\nawait tools.write({ path: "/tmp/out.md", content: body });',
+			kind: "ts",
+			text: "write /tmp/out.md",
+		},
+		{
+			name: "tools.bash previews the command itself",
+			code: 'await tools.bash({ command: "bun test test/", timeout: 60 });',
+			kind: "ts",
+			text: "bun test test/",
+		},
+	]);
+});
+
 describe("previewCell: generic TypeScript", () => {
 	run([
 		{

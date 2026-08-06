@@ -125,6 +125,27 @@ could not supervise it, and a handle is useful immediately while an answer is
 not. Children write their final output to a file; the registry reports running,
 completed, or errored, so the parent decides when to read.
 
+### pi's tools are mounted behind the bridge, not registered with pi
+
+The session runs with pi's builtin tools disabled; the model's only tool is
+`execute`. But pi exports its tool implementations as plain ToolDefinitions,
+so the host mounts them itself (`pi-tools.ts`): cells call
+`await tools.read({ path })`, the request crosses the guest bridge, and the
+definition executes host-side with the calling cell's abort signal. Arguments
+are validated against each tool's own TypeBox schema before execution — a
+failure names the problem and shows the expected signature, and an unknown
+tool name suggests the nearest real one. The prompt's signature list is
+generated from the same schemas, so documentation cannot drift from
+validation.
+
+Two consequences of the bridge being JSON: tool details cross as data, and
+image blocks cannot cross as pixels the model would see. Images are therefore
+held host-side and forwarded into the cell's tool-result content; the guest
+value reports `images: n`. Costs: a bridged tool runs host-side, so its
+filesystem view is the host's (same machine, same cwd — a difference only if
+the guest ever runs elsewhere), and its output is data returned to the cell
+rather than transcript output.
+
 ## Failure modes
 
 | Failure | Behaviour |

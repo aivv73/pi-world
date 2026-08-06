@@ -11,6 +11,7 @@ import { basename, join } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
 import { EngineBusyError, EngineManager } from "../engine/index.js";
+import { createPiToolsHost, type PiToolsHost } from "./pi-tools.js";
 import { buildRlmTsPrompt } from "./prompt.js";
 import { ExecuteCellComponent, type ExecuteDetails, type ExecuteRenderState } from "./render.js";
 import { EngineLifecycle, summarizeNames } from "./session-engine.js";
@@ -57,6 +58,7 @@ const MAX_DEPTH = Number(process.env.PI_RLM_MAX_DEPTH ?? "2");
 
 export default function (pi: ExtensionAPI) {
 	let subagents: SubagentHost | undefined;
+	let piTools: PiToolsHost | undefined;
 	// A tool error must be thrown for pi to mark the call as failed, but pi's
 	// loop rebuilds thrown errors as bare text results, discarding details —
 	// and with them the collapsed header's duration and error name. Stash the
@@ -77,9 +79,10 @@ export default function (pi: ExtensionAPI) {
 				depth: DEPTH,
 				maxDepth: MAX_DEPTH,
 			});
+			piTools = createPiToolsHost({ cwd });
 			return new EngineManager({
 				cwd,
-				hostHandlers: subagents.handlers,
+				hostHandlers: { ...subagents.handlers, ...piTools.handlers },
 				// A snapshot is keyed to a session file; an ephemeral session has none
 				// to key it to, so its namespace lives and dies with the process.
 				snapshot: sessionKey ? { path: join(stateDir, "namespace.snapshot") } : undefined,
@@ -113,6 +116,9 @@ export default function (pi: ExtensionAPI) {
 				depth: DEPTH,
 				allowRecursion: DEPTH < MAX_DEPTH,
 				contextFiles: options?.contextFiles,
+				// Fresh definitions for the prompt: signatures come from the same
+				// schemas the bridge validates against, so they cannot drift.
+				toolSummaries: createPiToolsHost({ cwd: ctx.cwd }).describe(),
 			}),
 		};
 	});
@@ -204,6 +210,9 @@ export default function (pi: ExtensionAPI) {
 				if (r.status === "error" && errorLines) sections.push(errorLines.join("\n"));
 				if (r.status === "aborted") sections.push("[cell aborted]");
 				const text = sections.filter((section) => section !== undefined && section !== "").join("\n");
+				// Images from bridged tool calls cross host-side: the guest saw a
+				// count, the model sees the pixels.
+				const images = piTools?.drainImages() ?? [];
 
 				const details: ExecuteDetails = {
 					status: r.status,
@@ -215,12 +224,15 @@ export default function (pi: ExtensionAPI) {
 					errorStack: errorLines,
 				};
 				const result = {
-					content: [{ type: "text" as const, text: text || "(no output)" }],
+					content: [
+						{ type: "text" as const, text: text || "(no output)" },
+						...images.map((image) => ({ type: "image" as const, data: image.data, mimeType: image.mimeType })),
+					],
 					details,
 				};
 				if (r.status === "error") {
 					pendingErrorDetails.set(toolCallId, details);
-					throw new Error(result.content[0].text);
+					throw new Error(text || "(no output)");
 				}
 				return result;
 			} catch (error) {

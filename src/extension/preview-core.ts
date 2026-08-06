@@ -419,6 +419,35 @@ function fileCandidates(source: string, vars: ReadonlyMap<string, string>): Cand
 	return candidates;
 }
 
+// ── bridged host tools ───────────────────────────────────────────────────────
+
+/** Per-tool: which argument names the target, the verb shown, and the band. */
+const BRIDGED_TOOLS: Record<string, { arg: string; verb: string; score: number }> = {
+	read: { arg: "path", verb: "read", score: 70 },
+	bash: { arg: "command", verb: "", score: 88 },
+	edit: { arg: "path", verb: "edit", score: 95 },
+	write: { arg: "path", verb: "write", score: 95 },
+	grep: { arg: "pattern", verb: "grep", score: 68 },
+	find: { arg: "pattern", verb: "find", score: 68 },
+	ls: { arg: "path", verb: "ls", score: 68 },
+};
+
+function bridgedToolCandidates(source: string, vars: ReadonlyMap<string, string>): Candidate[] {
+	const candidates: Candidate[] = [];
+	for (const match of source.matchAll(/\btools\.(\w+)\s*\(\s*\{([^}]*)\}/g)) {
+		const spec = BRIDGED_TOOLS[match[1] ?? ""];
+		if (!spec) continue;
+		const props = match[2] ?? "";
+		const argMatch = props.match(new RegExp(spec.arg + "\\s*:\\s*([^,}]+)"));
+		const target = argMatch ? resolveArgText(argMatch[1] ?? "", vars) : undefined;
+		if (!target) continue;
+		// A bridged bash call is a command like any other; show the command.
+		const text = spec.verb ? spec.verb + " " + target : previewShellCommand(target) || target;
+		candidates.push({ kind: "ts", text: descriptor(text), score: spec.score });
+	}
+	return candidates;
+}
+
 // ── generic line scoring ─────────────────────────────────────────────────────
 
 const SKIP_LINE_PATTERN = /^(?:$|\/\/|\/\*|\*|import\s|export\s+(?:type\s|\{)|[})\];,]+$)/;
@@ -481,6 +510,7 @@ export function previewCell(code: string): CellPreview {
 		...agent.candidates,
 		...shell.candidates,
 		...fileCandidates(shell.masked, vars),
+		...bridgedToolCandidates(shell.masked, vars),
 		...genericCandidates(shell.masked),
 	];
 

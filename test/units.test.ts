@@ -203,6 +203,20 @@ describe("system prompt", () => {
 		expect(prompt).toContain("PROJECT_RULE_MARKER");
 	});
 
+	test("host tools section appears only when summaries are supplied, with doctrine", () => {
+		const withTools = buildRlmTsPrompt({
+			cwd: "/tmp",
+			toolSummaries: ["tools.read({ path: string }) — Read the contents of a file."],
+		});
+		expect(withTools).toContain("# Host tools");
+		expect(withTools).toContain("tools.read({ path: string })");
+		// The doctrine: edits over rewrites, tools.read for source/images, Bun.$ for shell.
+		expect(withTools).toContain("tools.edit");
+		expect(withTools).toContain("fails loudly");
+		expect(withTools).toContain("Bun.$` remains the way to run shell commands");
+		expect(buildRlmTsPrompt({ cwd: "/tmp" })).not.toContain("# Host tools");
+	});
+
 	test("no unresolved template placeholders leak into the prompt", () => {
 		const prompt = buildRlmTsPrompt({ cwd: "/tmp", depth: 1 });
 		expect(prompt).not.toContain("undefined");

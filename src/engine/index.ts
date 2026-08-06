@@ -63,8 +63,17 @@ export interface ExecuteOptions {
 	maxOutputChars?: number;
 }
 
+/** Passed alongside a host request's payload. */
+export interface HostRequestContext {
+	/** Aborts when the cell that (transitively) issued the request is cancelled. */
+	signal?: AbortSignal;
+}
+
 /** Handles one typed request from guest code. Reply is sent back verbatim. */
-export type HostRequestHandler = (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
+export type HostRequestHandler = (
+	payload: Record<string, unknown>,
+	context?: HostRequestContext,
+) => Promise<Record<string, unknown>>;
 export type HostRequestHandlers = Record<string, HostRequestHandler>;
 
 export interface SnapshotResult {
@@ -124,6 +133,8 @@ interface ActiveExecution {
 	settled: boolean;
 	/** Set on cancellation: a cancelled cell must stop contributing output at once. */
 	abortRequested: boolean;
+	/** Aborts host-side work done on this cell's behalf (bridged tool calls). */
+	hostAbort: AbortController;
 	resolve(result: ExecuteResult): void;
 	reject(error: Error): void;
 }
@@ -432,9 +443,11 @@ export class EngineManager {
 			if (!handler) {
 				throw new Error(`host request type "${requestType}" is not available in this session`);
 			}
-			// Attribute the request to the cell that (transitively) issued it.
+			// Attribute the request to the cell that (transitively) issued it, and
+			// hand it that cell's abort signal so host-side work (a bridged bash
+			// call, a subprocess) stops when the cell does.
 			const cellSourceCode = this.activeExecution?.code ?? this.lastCellCode;
-			const reply = await handler({ ...payload, cellSourceCode });
+			const reply = await handler({ ...payload, cellSourceCode }, { signal: this.activeExecution?.hostAbort.signal });
 			this.sendToGuest({ type: "host_reply", id, status: "ok", payload: reply });
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -532,6 +545,7 @@ export class EngineManager {
 				status: "ok",
 				settled: false,
 				abortRequested: false,
+				hostAbort: new AbortController(),
 				resolve,
 				reject,
 			};
@@ -540,6 +554,7 @@ export class EngineManager {
 			let graceTimer: ReturnType<typeof setTimeout> | undefined;
 			const onAbort = () => {
 				active.abortRequested = true;
+				active.hostAbort.abort();
 				this.sendToGuest({ type: "abort", cellId });
 				this.maybeWedged = true;
 				graceTimer = setTimeout(() => {

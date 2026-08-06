@@ -481,6 +481,38 @@ describe("host bridge", () => {
 		expect(r.durationMs).toBeLessThan(1_000);
 	});
 
+	test("host requests carry the issuing cell's abort signal", async () => {
+		// A bridged tool call may hold a subprocess. When the cell is cancelled,
+		// the host-side work must learn about it — otherwise "abort" stops the
+		// cell but leaves its tool running to completion.
+		let observed: AbortSignal | undefined;
+		let sawAbort = false;
+		const controller = new AbortController();
+		const m = engine({
+			hostHandlers: {
+				"test.hang": async (_payload, context) => {
+					observed = context?.signal;
+					await new Promise<void>((resolve) => {
+						context?.signal?.addEventListener("abort", () => {
+							sawAbort = true;
+							resolve();
+						});
+					});
+					return { done: true };
+				},
+			},
+		});
+		const running = m.execute('await rlm.hostRequest("test.hang", {}); "never"', { signal: controller.signal });
+		await new Promise((r) => setTimeout(r, 300));
+		controller.abort();
+		const r = await running;
+		expect(r.status).toBe("aborted");
+		expect(observed).toBeDefined();
+		// The handler's signal fired because the cell was cancelled.
+		await new Promise((r) => setTimeout(r, 100));
+		expect(sawAbort).toBe(true);
+	});
+
 	test("host receives the source of the calling cell (cellSourceCode attribution)", async () => {
 		// Each request carries the source of the cell that made it, so the host can
 		// attribute an action to the program that asked for it.
