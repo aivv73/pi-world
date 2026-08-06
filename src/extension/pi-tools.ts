@@ -77,7 +77,7 @@ export interface PiToolsHost {
  * "[19 more lines in file. Use offset=4 to continue.]" — which is right for a
  * transcript and wrong for JSON.parse. `raw` is the content alone.
  */
-export function stripReaderNotices(text: string): string {
+function stripReaderNotices(text: string): string {
 	const lines = text.split("\n");
 	let removed = false;
 	while (lines.length > 0 && /^\[.*\]$/.test(lines[lines.length - 1] ?? "")) {
@@ -117,7 +117,7 @@ function propertyType(prop: SchemaProperty): string {
 }
 
 /** `read({ path: string, offset?: number, limit?: number })` — from the schema, so it never drifts. */
-export function toolSignature(def: MountedTool): string {
+function toolSignature(def: MountedTool): string {
 	const required = new Set(def.parameters.required ?? []);
 	const params = Object.entries(def.parameters.properties ?? {})
 		.map(([name, prop]) => `${name}${required.has(name) ? "" : "?"}: ${propertyType(prop)}`)

@@ -187,9 +187,11 @@ describe("system prompt", () => {
 	});
 
 	test("child doctrine appears only at depth > 0", () => {
-		expect(buildRlmTsPrompt({ cwd: "/tmp", depth: 0 })).not.toContain("child agent spawned by");
-		const child = buildRlmTsPrompt({ cwd: "/tmp", depth: 1, parentAgent: "root-agent" });
-		expect(child).toContain("child agent spawned by root-agent");
+		// "child agent" alone also appears in the subagent guidance; the doctrine's
+		// identity sentence is the distinctive marker.
+		expect(buildRlmTsPrompt({ cwd: "/tmp", depth: 0 })).not.toContain("You are a child agent");
+		const child = buildRlmTsPrompt({ cwd: "/tmp", depth: 1 });
+		expect(child).toContain("You are a child agent");
 		expect(child).toContain("output file");
 	});
 

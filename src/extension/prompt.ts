@@ -13,7 +13,6 @@ export interface RlmPromptOptions {
 	cwd: string;
 	messagesPath?: string;
 	depth?: number;
-	parentAgent?: string;
 	allowRecursion?: boolean;
 	contextFiles?: Array<{ path: string; content: string }>;
 	/** One line per mounted host tool, from the bridge's own schemas. */
@@ -56,7 +55,7 @@ function buildChildDoctrine(options: RlmPromptOptions): string | undefined {
 	const depth = options.depth ?? 0;
 	if (depth <= 0) return undefined;
 	return [
-		`You are a child agent spawned by ${options.parentAgent ?? "your parent agent"}. Task prompts come from your parent.`,
+		"You are a child agent; your task prompt comes from your parent agent.",
 		"When the task calls for an answer, your final printed answer is your reply: it is written to your output file, which your parent reads. Keep it self-contained.",
 	].join("\n");
 }

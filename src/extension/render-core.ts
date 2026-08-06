@@ -131,7 +131,7 @@ function highlightLine(line: string, deps: RenderDeps): string {
 	return isShellish(line) ? deps.fg("accent", line) : deps.highlight(line);
 }
 
-export function outputText(state: ExecuteRenderState): string {
+function outputText(state: ExecuteRenderState): string {
 	const details = state.details;
 	if (details && (details.stdout || details.stderr || details.result)) {
 		return [details.stdout, details.stderr, details.result]
