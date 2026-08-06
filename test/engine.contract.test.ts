@@ -741,3 +741,52 @@ describe("isolation", () => {
 		expect(chunks.some((c) => c.startsWith("stderr:tagged-err"))).toBe(true);
 	});
 });
+
+describe("shell interpolation safety", () => {
+	// A nullish value interpolates as the literal text "undefined", so a stale
+	// variable silently retargets the command instead of failing. rm -rf ${dir}
+	// becoming rm -rf undefined is the failure this exists to prevent.
+	test("a nullish interpolation is refused before the command is built", async () => {
+		const m = engine();
+		const r = await m.execute("await Bun.$`echo ${missingVar}`.quiet()");
+		expect(r.status).toBe("error");
+		expect(r.error?.name).toBe("TypeError");
+		expect(r.error?.message).toContain("interpolation #1");
+		expect(r.error?.message).toContain("undefined");
+	});
+
+	test("the refusal names which interpolation failed", async () => {
+		const m = engine();
+		const r = await m.execute("const dir = undefined; await Bun.$`echo ok ${dir}`.quiet()");
+		expect(r.status).toBe("error");
+		expect(r.error?.message).toContain("interpolation #1");
+		// null is reported distinctly from undefined so the cause is unambiguous.
+		const viaNull = await m.execute("await Bun.$`echo ${null}`.quiet()");
+		expect(viaNull.error?.message).toContain("null");
+	});
+
+	test("the namespace survives a refused interpolation", async () => {
+		const m = engine();
+		await m.execute("keep = 42");
+		const r = await m.execute("touched = 1; await Bun.$`ls ${undefinedThing}`.quiet(); touched = 2");
+		expect(r.status).toBe("error");
+		// Bindings made before the throw stay bound; the cell is not a transaction.
+		expect((await m.execute("[keep, touched]")).result).toContain("42");
+		expect((await m.execute("touched")).result).toBe("1");
+	});
+
+	test("valid interpolations still work, including falsy ones", async () => {
+		const m = engine();
+		const r = await m.execute(
+			'const n = 0; const s = ""; (await Bun.$`echo [${n}][${s}]`.quiet()).stdout.toString().trim()',
+		);
+		expect(r.status).toBe("ok");
+		expect(r.result).toContain("[0][]");
+	});
+
+	test("the rest of the Bun namespace is untouched by the guard", async () => {
+		const m = engine();
+		const r = await m.execute('typeof Bun.file === "function" && typeof Bun.$.escape === "function"');
+		expect(r.result).toBe("true");
+	});
+});

@@ -191,6 +191,44 @@ function hostRequest(requestType: string, payload: Record<string, unknown> = {})
 	});
 }
 
+/**
+ * Bun.$ interpolates values into the command string, and `String(undefined)` is
+ * the literal text "undefined". A single stale variable therefore turns
+ * `rm -rf ${dir}` into `rm -rf undefined` — a command that runs, succeeds, and
+ * operates on entirely the wrong path. The shell cannot distinguish a missing
+ * value from one that is genuinely the word "undefined", so it is refused here,
+ * before the command is ever built.
+ */
+function guardShellInterpolation(shell: typeof Bun.$): typeof Bun.$ {
+	return new Proxy(shell, {
+		apply(target, thisArg, args: unknown[]) {
+			const [strings, ...values] = args as [TemplateStringsArray, ...unknown[]];
+			for (let i = 0; i < values.length; i++) {
+				if (values[i] === null || values[i] === undefined) {
+					const preceding = (strings?.[i] ?? "").trimStart().slice(-40);
+					const where = preceding ? ` (after "…${preceding}")` : "";
+					throw new TypeError(
+						`Bun.$ interpolation #${i + 1}${where} is ${values[i] === null ? "null" : "undefined"}. ` +
+							`It would be interpolated as the literal text "${String(values[i])}", producing a command that runs ` +
+							"against the wrong target. Check the value before using it in a shell command.",
+					);
+				}
+			}
+			return Reflect.apply(target as (...a: unknown[]) => unknown, thisArg, args);
+		},
+	});
+}
+
+const GUARDED_SHELL = guardShellInterpolation(Bun.$);
+
+const GUARDED_BUN = new Proxy(Bun, {
+	get(target, key) {
+		if (key === "$") return GUARDED_SHELL;
+		// Bind the receiver to the real Bun so its methods keep their own `this`.
+		return Reflect.get(target, key, target);
+	},
+});
+
 const RLM_HANDLE = {
 	hostRequest,
 	async run(prompt: string, kwargs: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
@@ -210,6 +248,10 @@ const INTERNAL_BINDINGS = new Map<string, unknown>();
 function installBootstrapBindings(): void {
 	namespace.rlm = RLM_HANDLE;
 	INTERNAL_BINDINGS.set("rlm", RLM_HANDLE);
+	// Cells resolve `Bun` through the namespace, so this shadows the global with
+	// a version whose shell refuses nullish interpolation.
+	namespace.Bun = GUARDED_BUN;
+	INTERNAL_BINDINGS.set("Bun", GUARDED_BUN);
 }
 
 installBootstrapBindings();
