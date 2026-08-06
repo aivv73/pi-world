@@ -167,6 +167,8 @@ export class EngineManager {
 	private readonly nonce = randomUUID().replaceAll("-", "");
 	/** Tail of the guest's own stderr, surfaced when it dies unexpectedly. */
 	private guestStderr = "";
+	/** Resolves when the child and all of its stdio have fully closed. */
+	private childClosed?: Promise<void>;
 	/** Held so the protocol reader is not garbage-collected mid-session, which
 	 * would close the guest's write end and kill it with EPIPE. */
 	private protocolReader?: ReturnType<typeof createInterface>;
@@ -215,6 +217,7 @@ export class EngineManager {
 			stdio: ["pipe", "pipe", "pipe", "pipe"],
 		});
 		this.child = child;
+		this.childClosed = new Promise((resolve) => child.once("close", () => resolve()));
 
 		const ready = new Promise<void>((resolve, reject) => {
 			const timer = setTimeout(() => reject(new Error("Engine guest did not become ready in time")), READY_TIMEOUT_MS);
@@ -258,6 +261,10 @@ export class EngineManager {
 			this.transitionToShutdown(message);
 		});
 		child.on("exit", (code, signal) => {
+			// A killed child's exit event arrives after teardown has already moved
+			// on. Acting on it would reject an execution nobody is waiting for any
+			// more, surfacing as an unhandled rejection in an unrelated context.
+			if (this.child !== child) return;
 			if (this.state !== "shutdown") {
 				const tail = this.guestStderr.trim();
 				const reason =
@@ -269,6 +276,10 @@ export class EngineManager {
 		});
 
 		await ready;
+		// Being torn down while starting wins: without this the late assignment
+		// resurrects a killed engine as "running", and the child's own exit event
+		// then reads that as an unexpected death.
+		if ((this.state as string) === "shutdown") throw new Error("Engine has been shut down");
 		this.state = "running";
 	}
 
@@ -292,7 +303,16 @@ export class EngineManager {
 	}
 
 	async kill(): Promise<void> {
+		const closed = this.childClosed;
 		this.killSync();
+		// Teardown is not done until the child's stdio is actually closed. A
+		// SIGKILL'd child's pipes are torn down asynchronously, and a spawn that
+		// follows too quickly recycles those descriptors while the teardown is
+		// still in flight - which can close a pipe belonging to the new engine.
+		// Observed as a fresh guest hitting EPIPE on its first protocol write.
+		if (closed) {
+			await Promise.race([closed, new Promise<void>((resolve) => setTimeout(resolve, 2000).unref?.())]);
+		}
 	}
 
 	/** Synchronous teardown, safe from process.on("exit"). */
@@ -327,7 +347,7 @@ export class EngineManager {
 	}
 
 	private request(message: HostToGuestMessage & { id: string }, timeoutMs: number): Promise<GuestToHostMessage> {
-		return new Promise((resolve, reject) => {
+		const pending = new Promise<GuestToHostMessage>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				this.pendingRequests.delete(message.id);
 				reject(new Error(`Engine request ${message.type} timed out`));
@@ -336,6 +356,13 @@ export class EngineManager {
 			this.pendingRequests.set(message.id, { resolve, reject, timer });
 			this.sendToGuest(message);
 		});
+		// Teardown rejects every outstanding request. A caller that has already
+		// moved on is no longer listening, and that rejection would otherwise
+		// escape as an unhandled rejection in whatever happens to be running.
+		// Marking it handled here does not hide anything from the real caller,
+		// which still receives the rejection through the returned promise.
+		pending.catch(() => {});
+		return pending;
 	}
 
 	private handleGuestLine(line: string): void {

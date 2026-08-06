@@ -790,3 +790,41 @@ describe("shell interpolation safety", () => {
 		expect(r.result).toBe("true");
 	});
 });
+
+describe("teardown races", () => {
+	// Found by an intermittent full-suite failure: a torn-down engine's late exit
+	// event rejected an execution nobody was awaiting any more, and the unhandled
+	// rejection was attributed to whichever unrelated test was running.
+	test("killing an engine while it is starting does not resurrect it as running", async () => {
+		const m = engine();
+		// The handler goes on at creation: kill() now takes real time (it waits
+		// for the child to close), and a startup rejection left handler-less
+		// across that wait is itself an unhandled-rejection bug in the caller.
+		const starting = m.start().catch(() => "rejected");
+		await m.kill();
+		// start() may reject or resolve; what matters is that it cannot leave a
+		// killed engine reporting itself alive.
+		await starting;
+		expect(m.isRunning).toBe(false);
+		await expect(m.execute("1+1")).rejects.toThrow(/shut down/i);
+	});
+
+	test("a killed engine's exit event does not reject an abandoned execution", async () => {
+		const rejections: unknown[] = [];
+		const onRejection = (reason: unknown) => rejections.push(reason);
+		process.on("unhandledRejection", onRejection);
+		try {
+			const m = engine();
+			await m.execute("1+1");
+			// Abandon an in-flight cell exactly as an interrupted caller would.
+			void m.execute("await new Promise((r) => setTimeout(r, 30_000));").catch(() => {});
+			await new Promise((r) => setTimeout(r, 150));
+			await m.kill();
+			// Long enough for the child's exit event to be delivered.
+			await new Promise((r) => setTimeout(r, 400));
+			expect(rejections).toHaveLength(0);
+		} finally {
+			process.off("unhandledRejection", onRejection);
+		}
+	});
+});

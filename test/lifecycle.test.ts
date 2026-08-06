@@ -11,7 +11,10 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import type { RestoreResult } from "../src/engine/index.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { EngineManager, type RestoreResult } from "../src/engine/index.js";
 import { EngineLifecycle, formatEngineResetNotice, type RevivableEngine } from "../src/extension/session-engine.js";
 
 class FakeEngine implements RevivableEngine {
@@ -140,4 +143,58 @@ describe("engine reset notice", () => {
 			expect(notice).toContain("shell interpolation");
 		}
 	});
+});
+
+describe("engine lifecycle over a real engine", () => {
+	// The incident reproduced with real processes: an engine dies mid-session and
+	// the next cell has to rebuild it. Nothing here calls a lifecycle event, which
+	// is the point - that is precisely what pi skips on reload.
+	test("a rebuilt engine revives the previous engine's namespace from disk", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "rlm-lifecycle-"));
+		const snapshot = { path: join(dir, "namespace.snapshot") };
+		const built: EngineManager[] = [];
+		const lifecycle = new EngineLifecycle<EngineManager>({
+			create() {
+				const engine = new EngineManager({ snapshot });
+				built.push(engine);
+				return engine;
+			},
+			dispose: (engine) => engine.dispose(),
+		});
+
+		const first = (await lifecycle.acquire("startup")).engine;
+		await first.execute('tmp = "/tmp/pi-rlm-pack-test"');
+		await first.execute("keep = 7");
+		// dispose flushes a final snapshot, standing in for pi's teardown.
+		await lifecycle.shutdown();
+
+		const { engine: second, restore, created } = await lifecycle.acquire("cell");
+		expect(created).toBe(true);
+		expect(built).toHaveLength(2);
+		expect(restore?.restored).toContain("tmp");
+
+		// The variable is genuinely usable in the new guest, not merely listed.
+		const r = await second.execute("tmp");
+		expect(r.result).toContain("/tmp/pi-rlm-pack-test");
+		expect((await second.execute("keep")).result).toBe("7");
+
+		const notice = lifecycle.takeResetNotice();
+		expect(notice).toContain("<rlm_engine_reset>");
+		expect(notice).toContain("tmp");
+		await lifecycle.shutdown();
+		rmSync(dir, { recursive: true, force: true });
+	}, 30_000);
+
+	test("a rebuild with no snapshot says the namespace is empty", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "rlm-lifecycle-"));
+		const lifecycle = new EngineLifecycle<EngineManager>({
+			create: () => new EngineManager({ snapshot: { path: join(dir, "namespace.snapshot") } }),
+			dispose: (engine) => engine.dispose(),
+		});
+		const { engine } = await lifecycle.acquire("cell");
+		expect(await engine.execute("1 + 1")).toMatchObject({ status: "ok" });
+		expect(lifecycle.takeResetNotice()).toContain("namespace is empty");
+		await lifecycle.shutdown();
+		rmSync(dir, { recursive: true, force: true });
+	}, 30_000);
 });
