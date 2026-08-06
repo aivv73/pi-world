@@ -46,7 +46,7 @@ function buildHostToolsSection(summaries: readonly string[]): string {
 		"",
 		...summaries,
 		"",
-		"Prefer `tools.edit({ path, oldText, newText })` over rewriting files with Bun.write: it fails loudly when oldText is stale instead of silently reverting content you have not seen.",
+		"Prefer `tools.edit({ path, edits: [{ oldText, newText }] })` over rewriting files with Bun.write: it fails loudly when an oldText is stale instead of silently reverting content you have not seen.",
 		"Prefer `tools.read({ path })` over `Bun.file(path).text()` for source files and anything that might be an image: it enforces size caps with continuation offsets and renders images so you can see them. Its `text` may end with bracketed reader notices; parse `raw` instead, which is the content alone.",
 		"`Bun.$` remains the way to run shell commands; `tools.bash` exists mainly for parity and timeouts.",
 	].join("\n");
