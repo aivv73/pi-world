@@ -8,12 +8,12 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { decodeMessage, encodeMessage } from "../src/engine/protocol.js";
 import { transformCell } from "../src/engine/transform.js";
-import { buildRlmTsPrompt } from "../src/extension/prompt.js";
+import { buildRlmTsPrompt, detectAvailableClis } from "../src/extension/prompt.js";
 import {
 	backgroundFor,
 	closeOpenSgr,
@@ -215,6 +215,22 @@ describe("system prompt", () => {
 		expect(withTools).toContain("fails loudly");
 		expect(withTools).toContain("Bun.$` remains the way to run shell commands");
 		expect(buildRlmTsPrompt({ cwd: "/tmp" })).not.toContain("# Host tools");
+	});
+
+	test("CLI detection stats the PATH instead of spawning, and the inventory renders", () => {
+		const binDir = mkdtempSync(join(tmpdir(), "rlm-cli-"));
+		writeFileSync(join(binDir, "git"), "#!/bin/sh\n", { mode: 0o755 });
+		writeFileSync(join(binDir, "runline"), "#!/bin/sh\n", { mode: 0o755 });
+		writeFileSync(join(binDir, "notacli"), "", { mode: 0o644 });
+		try {
+			const found = detectAvailableClis(["git", "runline", "docker", "notacli"], binDir);
+			expect(found).toEqual(["git", "runline"]);
+			const prompt = buildRlmTsPrompt({ cwd: "/tmp", availableClis: found });
+			expect(prompt).toContain("Available CLIs: git, runline (plugin actions via `runline exec`).");
+			expect(buildRlmTsPrompt({ cwd: "/tmp", availableClis: [] })).not.toContain("Available CLIs");
+		} finally {
+			rmSync(binDir, { recursive: true, force: true });
+		}
 	});
 
 	test("CLI doctrine: probe once, wrap in a namespace helper, parse as data", () => {

@@ -9,6 +9,9 @@
  * with subagents, and let each cell build on the last.
  */
 
+import { accessSync, constants } from "node:fs";
+import { delimiter, join } from "node:path";
+
 export interface RlmPromptOptions {
 	cwd: string;
 	messagesPath?: string;
@@ -18,6 +21,54 @@ export interface RlmPromptOptions {
 	contextFiles?: Array<{ path: string; content: string }>;
 	/** One line per mounted host tool, from the bridge's own schemas. */
 	toolSummaries?: string[];
+	/** CLI names found on PATH at session start; anchors the CLI doctrine. */
+	availableClis?: string[];
+}
+
+/** The probe list: common enough to matter, curated so the line stays short. */
+export const CLI_CANDIDATES = [
+	"git",
+	"gh",
+	"runline",
+	"herdr",
+	"bun",
+	"node",
+	"npm",
+	"docker",
+	"rg",
+	"jq",
+	"curl",
+	"tmux",
+] as const;
+
+const CLI_NOTES: Record<string, string> = {
+	runline: "plugin actions via `runline exec`",
+};
+
+/**
+ * Which candidates exist on PATH, by stat rather than subprocess: a dozen
+ * access checks cost microseconds, spawning `which` a dozen times does not.
+ */
+export function detectAvailableClis(
+	candidates: readonly string[] = CLI_CANDIDATES,
+	pathVar: string | undefined = process.env.PATH,
+): string[] {
+	const dirs = (pathVar ?? "").split(delimiter).filter(Boolean);
+	return candidates.filter((name) =>
+		dirs.some((dir) => {
+			try {
+				accessSync(join(dir, name), constants.X_OK);
+				return true;
+			} catch {
+				return false;
+			}
+		}),
+	);
+}
+
+function formatCliInventory(clis: readonly string[]): string {
+	const entries = clis.map((name) => (CLI_NOTES[name] ? `${name} (${CLI_NOTES[name]})` : name));
+	return `Available CLIs: ${entries.join(", ")}.`;
 }
 
 const EVALUATOR_CONTROL_PROMPT = [
@@ -115,6 +166,9 @@ export function buildRlmTsPrompt(options: RlmPromptOptions): string {
 	}
 
 	parts.push("", EVALUATOR_CONTROL_PROMPT, "", CLI_DOCTRINE);
+	if (options.availableClis && options.availableClis.length > 0) {
+		parts.push("", formatCliInventory(options.availableClis));
+	}
 
 	if (options.toolSummaries && options.toolSummaries.length > 0) {
 		parts.push("", buildHostToolsSection(options.toolSummaries));
