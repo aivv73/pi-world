@@ -57,6 +57,16 @@ const DEPTH = Number(process.env.PI_RLM_DEPTH ?? "0");
 const MAX_DEPTH = Number(process.env.PI_RLM_MAX_DEPTH ?? "2");
 
 export default function (pi: ExtensionAPI) {
+	pi.registerFlag("rlm", {
+		type: "boolean",
+		description: "Single execute tool backed by a persistent TypeScript evaluator; replaces the default tool surface",
+	});
+	// CLI flag values are injected after extension factories run (verified by
+	// probe: getFlag is undefined here, true in every event), so activation is
+	// decided per event, never at load. PI_RLM_FORCE is the dev escape hatch:
+	// subagent children and test rigs activate without flag plumbing.
+	const active = () => pi.getFlag("rlm") === true || process.env.PI_RLM_FORCE === "1";
+
 	let subagents: SubagentHost | undefined;
 	let piTools: PiToolsHost | undefined;
 	// A tool error must be thrown for pi to mark the call as failed, but pi's
@@ -111,6 +121,9 @@ export default function (pi: ExtensionAPI) {
 	// tools that this configuration does not register, and a prompt that
 	// advertises absent tools is worse than no prompt at all.
 	pi.on("before_agent_start", async (event, ctx) => {
+		// Dormant: pi's default prompt stands, and it is correct — the builtin
+		// tools it describes are actually registered in this configuration.
+		if (!active()) return undefined;
 		const options = (event as { systemPromptOptions?: { contextFiles?: Array<{ path: string; content: string }> } })
 			.systemPromptOptions;
 		return {
@@ -128,6 +141,14 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		if (!active()) {
+			// registerTool ran at load (the flag was unreadable then), so a stock
+			// session must actively drop execute from the surface to stay stock.
+			pi.setActiveTools(pi.getActiveTools().filter((name) => name !== "execute"));
+			return;
+		}
+		// Active: the whole LLM surface collapses to the one tool.
+		pi.setActiveTools(["execute"]);
 		// Revive a previous run's namespace before the first cell. This is the
 		// expected path, but never the only one: pi skips session_start on reload
 		// for extensions like this one, so the engine also revives itself when a
@@ -193,6 +214,9 @@ export default function (pi: ExtensionAPI) {
 			return { render: () => [], invalidate: () => {} };
 		},
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			if (!active()) {
+				throw new Error("pi-rlm is dormant in this session. Start pi with --rlm (or PI_RLM_FORCE=1) to use execute.");
+			}
 			if (ctx?.cwd) location = { cwd: ctx.cwd, sessionFile: ctx.sessionManager?.getSessionFile?.() ?? undefined };
 			// Building the engine here means the previous one went away mid-session;
 			// acquire revives it and arms the notice this cell will carry.

@@ -122,7 +122,6 @@ export function createSubagentHost(options: SubagentHostOptions): SubagentHost {
 						command: "pi",
 						args: [
 							"-p",
-							"-nbt",
 							"--no-extensions",
 							"-e",
 							join(import.meta.dirname, "index.ts"),
@@ -143,7 +142,10 @@ export function createSubagentHost(options: SubagentHostOptions): SubagentHost {
 				cwd: options.cwd,
 				detached: false,
 				stdio: ["ignore", outFd, outFd],
-				env: { ...process.env, PI_RLM_DEPTH: String(options.depth + 1) },
+				// PI_RLM_FORCE activates the child regardless of flag plumbing: the
+				// child loads this extension via -e and must enter the RLM world
+				// without depending on --rlm surviving pi's argv handling.
+				env: { ...process.env, PI_RLM_DEPTH: String(options.depth + 1), PI_RLM_FORCE: "1" },
 			});
 			closeSync(outFd);
 			entry.pid = child.pid;

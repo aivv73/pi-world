@@ -138,6 +138,13 @@ tool name suggests the nearest real one. The prompt's signature list is
 generated from the same schemas, so documentation cannot drift from
 validation.
 
+The bridge instantiates the tool definitions itself rather than reusing the
+ones pi registered for the session: pi's extension API exposes active tool
+*names* (`getActiveTools`), not definitions, so there is no clean handle to
+the registered objects — and in the activated configuration the builtins are
+deactivated anyway. Instantiating from the same factories pi uses keeps the
+behaviour identical at the cost of a second (idle) set of definition objects.
+
 Two consequences of the bridge being JSON: tool details cross as data, and
 image blocks cannot cross as pixels the model would see. Images are therefore
 held host-side and forwarded into the cell's tool-result content; the guest

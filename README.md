@@ -59,19 +59,30 @@ is a Bun process — without it on your PATH the engine will tell you so and sto
 curl -fsSL https://bun.sh/install | bash
 ```
 
-The extension is most useful with pi's built-in tools disabled, so `execute` is
-the only tool the model sees:
+## Launch
+
+The extension is dormant until asked for. A plain `pi` session is untouched —
+default prompt, default tools, no evaluator. Activation is one flag:
 
 ```bash
-pi -nbt
+pi --rlm
 ```
 
-To run it from a clone instead:
+That collapses the tool surface to `execute` and replaces the system prompt;
+no other pi flags are needed. To verify the two worlds:
+
+```bash
+pi -p "what tools do you have?"          # stock pi: read, bash, edit, ...
+pi -p --rlm "what tools do you have?"    # one tool: execute
+```
+
+To run from a clone (development), load the extension explicitly — the flag
+works the same, or set `PI_RLM_FORCE=1` where flag plumbing is awkward:
 
 ```bash
 git clone https://github.com/shift-labs-ai/pi-rlm && cd pi-rlm
 bun install
-pi -nbt -e ./src/extension/index.ts
+pi --rlm -e ./src/extension/index.ts
 ```
 
 ### Configuration
