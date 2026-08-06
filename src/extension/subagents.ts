@@ -67,9 +67,13 @@ export function createSubagentHost(options: SubagentHostOptions): SubagentHost {
 	const children = new Map<string, ReturnType<typeof spawn>>();
 
 	function toPublicEntry(entry: SubagentEntry): Record<string, unknown> {
+		// One name for one concept: rlm.run replies with `name`, so the registry
+		// must too — a poll that matches on `entry.name` has to work. (It did
+		// not, and the resulting waits timed out silently instead of detecting
+		// completion.)
 		return {
 			rlm_child_id: entry.rlm_child_id,
-			session_name: entry.session_name,
+			name: entry.session_name,
 			session_dir: entry.session_dir,
 			output_file: entry.output_file,
 			model: entry.model,

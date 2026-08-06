@@ -170,6 +170,7 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Execute TypeScript in a persistent Bun evaluator. Variables, imports, and loaded data persist across calls. " +
 			"Top-level await works. Shell: const out = await Bun.$`cmd`.quiet(); out.stdout.toString(). " +
+			"pi's file tools are mounted as tools.* (tools.read, tools.edit, tools.grep, ...). " +
 			"Subagents: await rlm.run(prompt) returns an admission handle; the child's answer lands in handle.output_file. " +
 			"The final expression of the cell is returned as the result.",
 		parameters: executeSchema,

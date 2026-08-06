@@ -127,6 +127,11 @@ describe("subagent host", () => {
 		const m = new EngineManager({ hostHandlers: host.handlers });
 		managers.push(m);
 		const r1 = await m.execute('(await rlm.run("t", { name: "my-worker" })).name');
+		// The registry speaks the same field: a poll matching on `name` must work.
+		const listed = await m.execute(
+			'(await rlm.listSubagents()).subagents.find((s) => s.name === "my-worker") !== undefined',
+		);
+		expect(listed.result).toContain("true");
 		expect(r1.result).toContain("my-worker");
 		const r2 = await m.execute(`await rlm.run("t", { name: "${"x".repeat(80)}" });`);
 		expect(r2.status).toBe("error");
