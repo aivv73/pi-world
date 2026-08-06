@@ -205,6 +205,12 @@ describe("system prompt", () => {
 		expect(prompt).toContain("PROJECT_RULE_MARKER");
 	});
 
+	test("reads-are-full doctrine is stated", () => {
+		const prompt = buildRlmTsPrompt({ cwd: "/tmp" });
+		expect(prompt).toContain("Writes are surgical; reads are full");
+		expect(prompt).toContain("read it start to finish");
+	});
+
 	test("host tools section appears only when summaries are supplied, with doctrine", () => {
 		const withTools = buildRlmTsPrompt({
 			cwd: "/tmp",

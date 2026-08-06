@@ -16,6 +16,8 @@
  * the guest value reports how many.
  */
 
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import {
 	createBashToolDefinition,
 	createEditToolDefinition,
@@ -171,6 +173,16 @@ export function createPiToolsHost(options: { cwd: string }): PiToolsHost {
 	const definitions = buildDefinitions(options.cwd);
 	let pendingImages: ImageBlock[] = [];
 	let callCounter = 0;
+	// Paths whose full content this session has seen through the bridge: read
+	// start-to-finish via tools.read, or written outright via tools.write. Reads
+	// inside cell code (Bun.file, readFileSync) are invisible here, which is why
+	// the nudge below says "via tools.read" and never accuses. Host-side state:
+	// dies with the engine, never snapshotted.
+	const fullyKnown = new Set<string>();
+
+	function editNudge(target: string): string {
+		return `\nnote: ${target} was never read in full via tools.read this session — partial context risks bad edits.`;
+	}
 
 	const handlers: HostRequestHandlers = {
 		"tools.call": async (payload, context) => {
@@ -187,8 +199,15 @@ export function createPiToolsHost(options: { cwd: string }): PiToolsHost {
 			const invalid = validationError(def, args);
 			if (invalid) throw new Error(invalid);
 
+			const argPath =
+				typeof (args as Record<string, unknown>).path === "string"
+					? resolve(options.cwd, (args as Record<string, unknown>).path as string)
+					: undefined;
+			// Sampled before the write executes: afterwards the file always exists.
+			const existedBefore = argPath !== undefined && existsSync(argPath);
+
 			const result = await def.execute(`rlm-tool-${++callCounter}`, args, context?.signal, undefined, undefined);
-			const text = result.content
+			let text = result.content
 				.filter((block) => block.type === "text" && typeof block.text === "string")
 				.map((block) => block.text)
 				.join("\n");
@@ -197,6 +216,27 @@ export function createPiToolsHost(options: { cwd: string }): PiToolsHost {
 					block.type === "image" && typeof block.data === "string" && typeof block.mimeType === "string",
 			);
 			pendingImages.push(...images);
+
+			if (argPath !== undefined) {
+				const record = args as Record<string, unknown>;
+				const truncated = Boolean(
+					(result.details as { truncation?: { truncated?: boolean } } | null | undefined)?.truncation?.truncated,
+				);
+				if (name === "read" && record.offset === undefined && record.limit === undefined && !truncated) {
+					// Start to finish, nothing cut: the session has seen this file whole.
+					fullyKnown.add(argPath);
+				}
+				if (name === "edit" && !fullyKnown.has(argPath)) {
+					text += editNudge(argPath);
+				}
+				if (name === "write") {
+					// Overwriting a file never seen whole earns the nudge; creating a
+					// fresh one does not. Either way its content is now ours entirely.
+					if (existedBefore && !fullyKnown.has(argPath)) text += editNudge(argPath);
+					fullyKnown.add(argPath);
+				}
+			}
+
 			const reply: Record<string, unknown> = {
 				text,
 				images: images.length,

@@ -148,6 +148,81 @@ describe("pi tools bridge", () => {
 		expect(r.result).toContain("total=3000 truncated=true");
 	});
 
+	test("full read then edit: no nudge", async () => {
+		const dir = workspace();
+		writeFileSync(join(dir, "seen.ts"), "export const a = 1;\n");
+		const { m } = bridgedEngine(dir);
+		const r = await m.execute(
+			'await tools.read({ path: "seen.ts" });\n' +
+				'const reply = await tools.edit({ path: "seen.ts", edits: [{ oldText: "a = 1", newText: "a = 2" }] });\n' +
+				"reply.text",
+		);
+		expect(r.status).toBe("ok");
+		expect(r.result).not.toContain("never read in full");
+	});
+
+	test("locating with grep is not reading: edit without a full read carries the nudge", async () => {
+		const dir = workspace();
+		writeFileSync(join(dir, "unseen.ts"), "export const a = 1;\n");
+		const { m } = bridgedEngine(dir);
+		const r = await m.execute(
+			'await tools.grep({ pattern: "a = 1", path: "." });\n' +
+				'const reply = await tools.edit({ path: "unseen.ts", edits: [{ oldText: "a = 1", newText: "a = 2" }] });\n' +
+				"reply.text",
+		);
+		expect(r.status).toBe("ok");
+		expect(r.result).toContain("never read in full via tools.read");
+		// The nudge is soft: the edit itself succeeded.
+		expect((await m.execute('(await tools.read({ path: "unseen.ts" })).raw')).result).toContain("a = 2");
+	});
+
+	test("a truncated read is not a full read", async () => {
+		const dir = workspace();
+		writeFileSync(join(dir, "huge.txt"), Array.from({ length: 3000 }, (_, i) => `line ${i}`).join("\n"));
+		const { m } = bridgedEngine(dir);
+		const r = await m.execute(
+			'await tools.read({ path: "huge.txt" });\n' + // truncated by the reader's own cap
+				'const reply = await tools.edit({ path: "huge.txt", edits: [{ oldText: "line 1\\n", newText: "line one\\n" }] });\n' +
+				"reply.text",
+		);
+		expect(r.status).toBe("ok");
+		expect(r.result).toContain("never read in full");
+	});
+
+	test("a limited read is not a full read either", async () => {
+		const dir = workspace();
+		writeFileSync(join(dir, "windowed.ts"), "export const a = 1;\nexport const b = 2;\n");
+		const { m } = bridgedEngine(dir);
+		const r = await m.execute(
+			'await tools.read({ path: "windowed.ts", limit: 1 });\n' +
+				'const reply = await tools.edit({ path: "windowed.ts", edits: [{ oldText: "b = 2", newText: "b = 3" }] });\n' +
+				"reply.text",
+		);
+		expect(r.status).toBe("ok");
+		expect(r.result).toContain("never read in full");
+	});
+
+	test("a file the session itself created is exempt", async () => {
+		const dir = workspace();
+		const { m } = bridgedEngine(dir);
+		const r = await m.execute(
+			'const w = await tools.write({ path: "fresh.ts", content: "export const a = 1;\\n" });\n' +
+				'const e = await tools.edit({ path: "fresh.ts", edits: [{ oldText: "a = 1", newText: "a = 2" }] });\n' +
+				'w.text + "|" + e.text',
+		);
+		expect(r.status).toBe("ok");
+		expect(r.result).not.toContain("never read in full");
+	});
+
+	test("overwriting an existing file never seen whole carries the nudge", async () => {
+		const dir = workspace();
+		writeFileSync(join(dir, "existing.md"), "# original\n");
+		const { m } = bridgedEngine(dir);
+		const r = await m.execute('(await tools.write({ path: "existing.md", content: "# replaced\\n" })).text');
+		expect(r.status).toBe("ok");
+		expect(r.result).toContain("never read in full");
+	});
+
 	test("namespace survives a bridged call and an edit lands on disk", async () => {
 		const dir = workspace();
 		writeFileSync(join(dir, "config.ts"), "export const level = 1;\n");

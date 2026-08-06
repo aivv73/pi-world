@@ -30,6 +30,8 @@ const EVALUATOR_CONTROL_PROMPT = [
 	"",
 	"Use code for reading, searching, and editing files (Bun.file, node:fs, Bun.$`grep ...`). Always assign read/search results to named top-level variables so you can revisit, filter, and slice them later without re-reading.",
 	"",
+	"Writes are surgical; reads are full. grep, ls, and head are for locating — before editing a file or reasoning broadly about it, read it start to finish. Partial reads (match windows, head, offset slices) miss imports, types, helpers, and the file's shape, and a bad edit from missing context costs more than any full read. Scope a read only when the file is genuinely too large, or when you already read it this session and need to re-check one region.",
+	"",
 	"Evaluator state persists across cells and tool calls: top-level variables, functions, classes, imports, notes, parsed outputs, and helper data structures all remain available in every later turn, and are revived on a best-effort basis when a session resumes. Tool calls are themselves `await` expressions, so their return values can be bound to variables and composed into program logic like any other call.",
 	"",
 	"If a cell result begins with an `<rlm_engine_reset>` block, the evaluator restarted and its namespace was rebuilt from a snapshot: re-verify any variable named there before reusing it, and never interpolate one into a shell command until you have confirmed it still holds what you expect.",
