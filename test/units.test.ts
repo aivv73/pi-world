@@ -16,11 +16,11 @@ import { transformCell } from "../src/engine/transform.js";
 import { buildRlmTsPrompt } from "../src/extension/prompt.js";
 import {
 	backgroundFor,
+	closeOpenSgr,
 	type ExecuteRenderState,
 	formatDuration,
 	isShellish,
 	paintBackground,
-	previewLine,
 	type RenderDeps,
 	renderExecuteCell,
 	statusKind,
@@ -271,9 +271,11 @@ function makeState(overrides: Partial<ExecuteRenderState> = {}): ExecuteRenderSt
 }
 
 describe("render-core: helpers", () => {
-	test("previewLine skips blanks and comment lines", () => {
-		expect(previewLine("\n// a comment\n   \nconst real = 1;")).toBe("const real = 1;");
-		expect(previewLine("// only comments")).toBe("");
+	test("closeOpenSgr resets colors left open by wrapping", () => {
+		expect(closeOpenSgr("\x1b[31mred")).toBe("\x1b[31mred\x1b[0m");
+		expect(closeOpenSgr("\x1b[38;5;10mgreen")).toBe("\x1b[38;5;10mgreen\x1b[0m");
+		expect(closeOpenSgr("\x1b[31mred\x1b[0m")).toBe("\x1b[31mred\x1b[0m");
+		expect(closeOpenSgr("plain")).toBe("plain");
 	});
 
 	test("isShellish detects Bun.$ templates", () => {

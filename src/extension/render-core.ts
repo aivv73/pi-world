@@ -27,6 +27,8 @@ export interface ExecuteRenderState {
 	hasResult: boolean;
 }
 
+import { previewCell } from "./preview-core.js";
+
 export type StatusKind = "error" | "aborted" | "running" | "queued" | "done";
 export type BgKind = "toolPendingBg" | "toolSuccessBg" | "toolErrorBg";
 
@@ -51,16 +53,46 @@ export function formatDuration(durationMs: number | undefined): string | undefin
 	return `${(durationMs / 1000).toFixed(1)}s`;
 }
 
-export function previewLine(code: string): string {
-	for (const line of code.split("\n")) {
-		const trimmed = line.trim();
-		if (trimmed.length > 0 && !trimmed.startsWith("//")) return trimmed;
-	}
-	return "";
-}
-
 export function isShellish(line: string): boolean {
 	return line.includes("Bun.$`");
+}
+
+const SGR_PATTERN = /\x1b\[([0-9;]*)m/g;
+
+/**
+ * Append a reset when `line` ends with a foreground or background color still
+ * open, so a span that wrapping split across lines cannot bleed into the
+ * trailing padding or the next row.
+ */
+export function closeOpenSgr(line: string): string {
+	let fgOpen = false;
+	let bgOpen = false;
+	for (const match of line.matchAll(SGR_PATTERN)) {
+		const params = match[1] === "" ? ["0"] : (match[1] ?? "").split(";");
+		for (let i = 0; i < params.length; i++) {
+			const code = Number(params[i]);
+			if (code === 0) {
+				fgOpen = false;
+				bgOpen = false;
+			} else if (code === 38 || code === 48) {
+				// Skip the payload of 38;5;n / 38;2;r;g;b so a component (e.g. 38)
+				// is not read as another SGR code.
+				if (code === 38) fgOpen = true;
+				else bgOpen = true;
+				const mode = Number(params[i + 1]);
+				i += mode === 2 ? 4 : mode === 5 ? 2 : 1;
+			} else if (code === 39) {
+				fgOpen = false;
+			} else if (code === 49) {
+				bgOpen = false;
+			} else if ((code >= 30 && code <= 37) || (code >= 90 && code <= 97)) {
+				fgOpen = true;
+			} else if ((code >= 40 && code <= 47) || (code >= 100 && code <= 107)) {
+				bgOpen = true;
+			}
+		}
+	}
+	return fgOpen || bgOpen ? `${line}\x1b[0m` : line;
 }
 
 export function statusKind(state: ExecuteRenderState): StatusKind {
@@ -111,8 +143,8 @@ export function outputText(state: ExecuteRenderState): string {
 
 function topLine(state: ExecuteRenderState, width: number, deps: RenderDeps): string {
 	const code = state.code.trimEnd();
-	const preview = previewLine(code);
-	const language = isShellish(preview) ? "rlm · shell" : "rlm";
+	const preview = previewCell(code);
+	const language = preview.kind === "shell" ? "rlm · shell" : preview.kind === "agent" ? "rlm · agent" : "rlm";
 	const prefix = `${marker(state, deps)} ${deps.fg("muted", language)}`;
 
 	// Fixed metadata after the preview — these must always survive; the preview
@@ -134,7 +166,12 @@ function topLine(state: ExecuteRenderState, width: number, deps: RenderDeps): st
 	if (duration) suffixParts.push(deps.fg("muted", duration));
 
 	const errorName = !state.isPartial ? state.details?.errorName : undefined;
-	if (errorName) suffixParts.push(deps.fg("error", errorName));
+	if (errorName) {
+		// "RangeError: demo explosion" beats a bare "RangeError" when it fits;
+		// the message is usually the fact the reader wants.
+		const summary = state.details?.errorStack?.[0];
+		suffixParts.push(deps.fg("error", summary && deps.visibleWidth(summary) <= 48 ? summary : errorName));
+	}
 
 	suffixParts.push(deps.keyHint(state.expanded));
 
@@ -146,8 +183,14 @@ function topLine(state: ExecuteRenderState, width: number, deps: RenderDeps): st
 	const fixed = 1 + deps.visibleWidth(prefix) + separatorWidth + deps.visibleWidth(suffix);
 	const previewBudget = Math.max(8, width - fixed - separatorWidth);
 
-	const middle = preview
-		? deps.truncateToWidth(highlightLine(preview, deps), previewBudget, "…")
+	// A semantic preview (a command, a task, a file effect) is not TypeScript;
+	// syntax-highlighting it would lie about what it is. Accent it instead.
+	const middle = preview.text
+		? deps.truncateToWidth(
+				preview.kind === "ts" ? deps.highlight(preview.text) : deps.fg("accent", preview.text),
+				previewBudget,
+				"…",
+			)
 		: !state.executionStarted
 			? deps.fg("muted", "waiting for code")
 			: "";
@@ -160,7 +203,7 @@ function addWrapped(lines: string[], prefix: string, text: string, width: number
 	const wrapped = deps.wrapTextWithAnsi(text, available);
 	for (const [index, line] of (wrapped.length > 0 ? wrapped : [""]).entries()) {
 		const linePrefix = index === 0 ? prefix : " ".repeat(deps.visibleWidth(prefix));
-		lines.push(deps.truncateToWidth(` ${linePrefix}${line}`, width, ""));
+		lines.push(deps.truncateToWidth(` ${linePrefix}${closeOpenSgr(line)}`, width, ""));
 	}
 }
 
