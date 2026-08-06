@@ -1,13 +1,38 @@
 {
-	"name": "pi-rlm",
-	"version": "0.0.1",
-	"private": true,
+	"name": "@shift-labs/pi-rlm",
+	"version": "0.1.0",
 	"type": "module",
-	"description": "RLM engine for pi: one `ts` tool executing TypeScript in a persistent Bun evaluator",
+	"description": "A pi extension with a single tool: execute, running TypeScript in a persistent Bun evaluator",
+	"keywords": [
+		"pi-package",
+		"pi",
+		"agent",
+		"bun",
+		"typescript",
+		"repl"
+	],
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/shift-labs-ai/pi-rlm.git"
+	},
+	"homepage": "https://github.com/shift-labs-ai/pi-rlm#readme",
+	"bugs": {
+		"url": "https://github.com/shift-labs-ai/pi-rlm/issues"
+	},
 	"pi": {
 		"extensions": [
 			"./src/extension/index.ts"
 		]
+	},
+	"files": [
+		"src",
+		"README.md",
+		"ARCHITECTURE.md",
+		"LICENSE"
+	],
+	"engines": {
+		"bun": ">=1.0.0"
 	},
 	"scripts": {
 		"test": "bun test test/",
@@ -19,6 +44,11 @@
 	"dependencies": {
 		"acorn": "^8.18.0"
 	},
+	"peerDependencies": {
+		"@mariozechner/pi-coding-agent": "*",
+		"@mariozechner/pi-tui": "*",
+		"@sinclair/typebox": "*"
+	},
 	"devDependencies": {
 		"@biomejs/biome": "2.3.5",
 		"@earendil-works/pi-coding-agent": "^0.84.0",
@@ -26,5 +56,16 @@
 		"@types/bun": "^1.3.14",
 		"typebox": "^1.3.11",
 		"typescript": "^7.0.2"
+	},
+	"peerDependenciesMeta": {
+		"@mariozechner/pi-coding-agent": {
+			"optional": true
+		},
+		"@mariozechner/pi-tui": {
+			"optional": true
+		},
+		"@sinclair/typebox": {
+			"optional": true
+		}
 	}
 }

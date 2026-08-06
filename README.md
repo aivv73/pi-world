@@ -48,21 +48,31 @@ namespace intact, and the cancelled cell cannot keep writing to it afterwards.
 
 ## Install
 
-Requires [Bun](https://bun.sh) and pi.
-
 ```bash
-git clone <this repo> && cd pi-rlm
-bun install
+pi install npm:@shift-labs/pi-rlm
 ```
 
-Run pi with only this tool registered:
+**[Bun](https://bun.sh) is required.** pi itself runs on Node, but the evaluator
+is a Bun process — without it on your PATH the engine will tell you so and stop.
 
 ```bash
+curl -fsSL https://bun.sh/install | bash
+```
+
+The extension is most useful with pi's built-in tools disabled, so `execute` is
+the only tool the model sees:
+
+```bash
+pi -nbt
+```
+
+To run it from a clone instead:
+
+```bash
+git clone https://github.com/shift-labs-ai/pi-rlm && cd pi-rlm
+bun install
 pi -nbt -e ./src/extension/index.ts
 ```
-
-`-nbt` disables pi's built-in tools; `-e` loads the extension. To install it
-permanently, add the path to `extensions` in your pi settings.
 
 ### Configuration
 

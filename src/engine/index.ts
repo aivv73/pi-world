@@ -247,8 +247,15 @@ export class EngineManager {
 		});
 
 		child.on("error", (error) => {
-			this.failAllPending(new Error(`Engine process failed: ${error.message}`));
-			this.transitionToShutdown(`Engine process failed: ${error.message}`);
+			// pi runs on Node, but the evaluator is a Bun process. When bun is not
+			// installed the raw ENOENT names a file nobody went looking for, so say
+			// what is actually missing and how to get it.
+			const message =
+				(error as NodeJS.ErrnoException).code === "ENOENT"
+					? "Engine process failed: 'bun' was not found on PATH. pi-rlm runs its evaluator in Bun; install it from https://bun.sh and restart pi."
+					: `Engine process failed: ${error.message}`;
+			this.failAllPending(new Error(message));
+			this.transitionToShutdown(message);
 		});
 		child.on("exit", (code, signal) => {
 			if (this.state !== "shutdown") {
