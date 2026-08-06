@@ -209,6 +209,9 @@ describe("system prompt", () => {
 		const prompt = buildRlmTsPrompt({ cwd: "/tmp" });
 		expect(prompt).toContain("Writes are surgical; reads are full");
 		expect(prompt).toContain("read it start to finish");
+		// The re-check shortcut dies with the first edit: an edited file must be
+		// reread whole, because memory of edited files drifts fastest.
+		expect(prompt).toContain("have not edited since");
 	});
 
 	test("host tools section appears only when summaries are supplied, with doctrine", () => {
