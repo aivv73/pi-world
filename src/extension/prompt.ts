@@ -9,9 +9,6 @@
  * with subagents, and let each cell build on the last.
  */
 
-import { accessSync, constants } from "node:fs";
-import { delimiter, join } from "node:path";
-
 export interface RlmPromptOptions {
 	cwd: string;
 	messagesPath?: string;
@@ -21,54 +18,6 @@ export interface RlmPromptOptions {
 	contextFiles?: Array<{ path: string; content: string }>;
 	/** One line per mounted host tool, from the bridge's own schemas. */
 	toolSummaries?: string[];
-	/** CLI names found on PATH at session start; anchors the CLI doctrine. */
-	availableClis?: string[];
-}
-
-/** The probe list: common enough to matter, curated so the line stays short. */
-export const CLI_CANDIDATES = [
-	"git",
-	"gh",
-	"runline",
-	"herdr",
-	"bun",
-	"node",
-	"npm",
-	"docker",
-	"rg",
-	"jq",
-	"curl",
-	"tmux",
-] as const;
-
-const CLI_NOTES: Record<string, string> = {
-	runline: "plugin actions via `runline exec`",
-};
-
-/**
- * Which candidates exist on PATH, by stat rather than subprocess: a dozen
- * access checks cost microseconds, spawning `which` a dozen times does not.
- */
-export function detectAvailableClis(
-	candidates: readonly string[] = CLI_CANDIDATES,
-	pathVar: string | undefined = process.env.PATH,
-): string[] {
-	const dirs = (pathVar ?? "").split(delimiter).filter(Boolean);
-	return candidates.filter((name) =>
-		dirs.some((dir) => {
-			try {
-				accessSync(join(dir, name), constants.X_OK);
-				return true;
-			} catch {
-				return false;
-			}
-		}),
-	);
-}
-
-function formatCliInventory(clis: readonly string[]): string {
-	const entries = clis.map((name) => (CLI_NOTES[name] ? `${name} (${CLI_NOTES[name]})` : name));
-	return `Available CLIs: ${entries.join(", ")}.`;
 }
 
 const EVALUATOR_CONTROL_PROMPT = [
@@ -87,17 +36,6 @@ const EVALUATOR_CONTROL_PROMPT = [
 	"If a cell result begins with an `<rlm_engine_reset>` block, the evaluator restarted and its namespace was rebuilt from a snapshot: re-verify any variable named there before reusing it, and never interpolate one into a shell command until you have confirmed it still holds what you expect.",
 	"",
 	"The final expression of a cell is rendered as its result. Prefer many small cells over one large cell: execute, observe, then continue.",
-].join("\n");
-
-const CLI_DOCTRINE = [
-	"# CLIs are tools",
-	"",
-	"Anything with a CLI is already a tool surface — the shell is the adapter. Probe `--help` once, wrap the invocation in a small helper kept in the namespace, parse the output into data, and reuse the helper across turns instead of re-deriving the command:",
-	"",
-	"    const gh = async (args: string) => JSON.parse((await Bun.$`gh ${{ raw: args }}`.quiet()).stdout.toString());",
-	'    const prs = await gh("pr list --json number,title");',
-	"",
-	"The same pattern covers `git`, `docker`, `jq`, and aggregators like `runline` (`runline exec '<js>'` exposes configured plugin actions). If a CLI is not on PATH, look for the project and run its entry point directly.",
 ].join("\n");
 
 function buildHostToolsSection(summaries: readonly string[]): string {
@@ -165,10 +103,7 @@ export function buildRlmTsPrompt(options: RlmPromptOptions): string {
 		parts.push("", SUBAGENT_GUIDANCE);
 	}
 
-	parts.push("", EVALUATOR_CONTROL_PROMPT, "", CLI_DOCTRINE);
-	if (options.availableClis && options.availableClis.length > 0) {
-		parts.push("", formatCliInventory(options.availableClis));
-	}
+	parts.push("", EVALUATOR_CONTROL_PROMPT);
 
 	if (options.toolSummaries && options.toolSummaries.length > 0) {
 		parts.push("", buildHostToolsSection(options.toolSummaries));

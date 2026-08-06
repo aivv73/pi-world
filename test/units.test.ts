@@ -8,12 +8,12 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { decodeMessage, encodeMessage } from "../src/engine/protocol.js";
 import { transformCell } from "../src/engine/transform.js";
-import { buildRlmTsPrompt, detectAvailableClis } from "../src/extension/prompt.js";
+import { buildRlmTsPrompt } from "../src/extension/prompt.js";
 import {
 	backgroundFor,
 	closeOpenSgr,
@@ -217,38 +217,10 @@ describe("system prompt", () => {
 		expect(buildRlmTsPrompt({ cwd: "/tmp" })).not.toContain("# Host tools");
 	});
 
-	test("CLI detection stats the PATH instead of spawning, and the inventory renders", () => {
-		const binDir = mkdtempSync(join(tmpdir(), "rlm-cli-"));
-		writeFileSync(join(binDir, "git"), "#!/bin/sh\n", { mode: 0o755 });
-		writeFileSync(join(binDir, "runline"), "#!/bin/sh\n", { mode: 0o755 });
-		writeFileSync(join(binDir, "notacli"), "", { mode: 0o644 });
-		try {
-			const found = detectAvailableClis(["git", "runline", "docker", "notacli"], binDir);
-			expect(found).toEqual(["git", "runline"]);
-			const prompt = buildRlmTsPrompt({ cwd: "/tmp", availableClis: found });
-			expect(prompt).toContain("Available CLIs: git, runline (plugin actions via `runline exec`).");
-			expect(buildRlmTsPrompt({ cwd: "/tmp", availableClis: [] })).not.toContain("Available CLIs");
-		} finally {
-			rmSync(binDir, { recursive: true, force: true });
-		}
-	});
-
-	test("CLI doctrine: probe once, wrap in a namespace helper, parse as data", () => {
-		const prompt = buildRlmTsPrompt({ cwd: "/tmp" });
-		expect(prompt).toContain("# CLIs are tools");
-		expect(prompt).toContain("--help");
-		expect(prompt).toContain("runline exec");
-		// The pattern, not a manual: one example, kept short.
-		expect(prompt.split("# CLIs are tools")[1]?.split("\n").length).toBeLessThan(12);
-	});
-
 	test("no unresolved template placeholders leak into the prompt", () => {
 		const prompt = buildRlmTsPrompt({ cwd: "/tmp", depth: 1 });
 		expect(prompt).not.toContain("undefined");
-		// A leak looks like ${cwd} — a bare identifier that should have been
-		// interpolated. The CLI doctrine's example legitimately shows Bun.$
-		// interpolation syntax, so the guard matches leak shapes, not all ${.
-		expect(prompt).not.toMatch(/\$\{[A-Za-z_][\w.]*\}/);
+		expect(prompt).not.toMatch(/\$\{/);
 	});
 });
 

@@ -12,7 +12,7 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
 import { EngineBusyError, EngineManager } from "../engine/index.js";
 import { createPiToolsHost, type PiToolsHost } from "./pi-tools.js";
-import { buildRlmTsPrompt, detectAvailableClis } from "./prompt.js";
+import { buildRlmTsPrompt } from "./prompt.js";
 import { ExecuteCellComponent, type ExecuteDetails, type ExecuteRenderState } from "./render.js";
 import { EngineLifecycle, summarizeNames } from "./session-engine.js";
 import { createSubagentHost, type SubagentHost } from "./subagents.js";
@@ -70,8 +70,6 @@ export default function (pi: ExtensionAPI) {
 	>();
 	// Where the engine will be built from, captured by whichever event runs first.
 	let location = { cwd: process.cwd(), sessionFile: undefined as string | undefined };
-	// PATH is stable for the life of the session; probe it once, not per prompt.
-	let detectedClis: string[] | undefined;
 
 	const lifecycle = new EngineLifecycle<EngineManager>({
 		create() {
@@ -115,7 +113,6 @@ export default function (pi: ExtensionAPI) {
 	pi.on("before_agent_start", async (event, ctx) => {
 		const options = (event as { systemPromptOptions?: { contextFiles?: Array<{ path: string; content: string }> } })
 			.systemPromptOptions;
-		detectedClis ??= detectAvailableClis();
 		return {
 			systemPrompt: buildRlmTsPrompt({
 				cwd: ctx.cwd,
@@ -126,7 +123,6 @@ export default function (pi: ExtensionAPI) {
 				// Fresh definitions for the prompt: signatures come from the same
 				// schemas the bridge validates against, so they cannot drift.
 				toolSummaries: createPiToolsHost({ cwd: ctx.cwd }).describe(),
-				availableClis: detectedClis,
 			}),
 		};
 	});
