@@ -13,6 +13,7 @@ import { Type } from "typebox";
 import { EngineBusyError, EngineManager } from "../engine/index.js";
 import { buildRlmTsPrompt } from "./prompt.js";
 import { ExecuteCellComponent, type ExecuteDetails, type ExecuteRenderState } from "./render.js";
+import { EngineLifecycle } from "./session-engine.js";
 import { createSubagentHost, type SubagentHost } from "./subagents.js";
 
 const executeSchema = Type.Object({
@@ -48,29 +49,36 @@ const DEPTH = Number(process.env.PI_RLM_DEPTH ?? "0");
 const MAX_DEPTH = Number(process.env.PI_RLM_MAX_DEPTH ?? "2");
 
 export default function (pi: ExtensionAPI) {
-	let engine: EngineManager | undefined;
 	let subagents: SubagentHost | undefined;
+	// Where the engine will be built from, captured by whichever event runs first.
+	let location = { cwd: process.cwd(), sessionFile: undefined as string | undefined };
 
-	function getEngine(cwd: string, sessionFile: string | undefined): EngineManager {
-		if (engine) return engine;
-		const sessionKey = sessionFile ? basename(sessionFile).replace(/\.jsonl$/, "") : undefined;
-		const stateDir = join(cwd, ".pi-rlm", sessionKey ?? "ephemeral");
-		subagents = createSubagentHost({
-			cwd,
-			subagentDir: join(stateDir, "subagents"),
-			defaultModel: DEFAULT_SUBAGENT_MODEL,
-			depth: DEPTH,
-			maxDepth: MAX_DEPTH,
-		});
-		engine = new EngineManager({
-			cwd,
-			hostHandlers: subagents.handlers,
-			// A snapshot is keyed to a session file; an ephemeral session has none
-			// to key it to, so its namespace lives and dies with the process.
-			snapshot: sessionKey ? { path: join(stateDir, "namespace.snapshot") } : undefined,
-		});
-		return engine;
-	}
+	const lifecycle = new EngineLifecycle<EngineManager>({
+		create() {
+			const { cwd, sessionFile } = location;
+			const sessionKey = sessionFile ? basename(sessionFile).replace(/\.jsonl$/, "") : undefined;
+			const stateDir = join(cwd, ".pi-rlm", sessionKey ?? "ephemeral");
+			subagents = createSubagentHost({
+				cwd,
+				subagentDir: join(stateDir, "subagents"),
+				defaultModel: DEFAULT_SUBAGENT_MODEL,
+				depth: DEPTH,
+				maxDepth: MAX_DEPTH,
+			});
+			return new EngineManager({
+				cwd,
+				hostHandlers: subagents.handlers,
+				// A snapshot is keyed to a session file; an ephemeral session has none
+				// to key it to, so its namespace lives and dies with the process.
+				snapshot: sessionKey ? { path: join(stateDir, "namespace.snapshot") } : undefined,
+			});
+		},
+		async dispose(engine) {
+			subagents?.killAll();
+			subagents = undefined;
+			await engine.dispose();
+		},
+	});
 
 	// Replace pi's default prompt wholesale. It describes read, bash, and edit
 	// tools that this configuration does not register, and a prompt that
@@ -90,9 +98,12 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		// Revive a previous run's namespace before the first cell.
-		const m = getEngine(ctx.cwd, ctx.sessionManager.getSessionFile());
-		const restore = await m.restoreState();
+		// Revive a previous run's namespace before the first cell. This is the
+		// expected path, but never the only one: pi skips session_start on reload
+		// for extensions like this one, so the engine also revives itself when a
+		// cell has to build it. See session-engine.ts.
+		location = { cwd: ctx.cwd, sessionFile: ctx.sessionManager.getSessionFile() ?? undefined };
+		const { restore } = await lifecycle.acquire("startup");
 		if (restore && restore.restored.length > 0) {
 			pi.sendMessage({
 				customType: "pi-rlm-restore",
@@ -105,10 +116,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async () => {
-		subagents?.killAll();
-		await engine?.dispose();
-		engine = undefined;
-		subagents = undefined;
+		await lifecycle.shutdown();
 	});
 
 	pi.registerTool<typeof executeSchema, ExecuteDetails, Partial<ExecuteRenderState>>({
@@ -139,7 +147,10 @@ export default function (pi: ExtensionAPI) {
 			return { render: () => [], invalidate: () => {} };
 		},
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
-			const m = getEngine(ctx?.cwd ?? process.cwd(), ctx?.sessionManager?.getSessionFile?.());
+			if (ctx?.cwd) location = { cwd: ctx.cwd, sessionFile: ctx.sessionManager?.getSessionFile?.() ?? undefined };
+			// Building the engine here means the previous one went away mid-session;
+			// acquire revives it and arms the notice this cell will carry.
+			const { engine: m } = await lifecycle.acquire("cell");
 			try {
 				// Accumulate: partial updates must only ever grow, or the TUI row height
 				// oscillates with each replacing chunk (visible as jumping).
@@ -151,8 +162,11 @@ export default function (pi: ExtensionAPI) {
 						onUpdate?.({ content: [{ type: "text", text: streamed }], details: {} });
 					},
 				});
-				// Result text mirrors the engine's channels in a stable order.
-				const sections = [r.stdout, r.stderr, r.result];
+				// A reset notice leads, so the model reads that its namespace was
+				// rebuilt before it reads output produced against the rebuilt one.
+				// The session_start chat message is not enough: mid-work it scrolls
+				// past, and the loss only shows up as a variable reading undefined.
+				const sections = [lifecycle.takeResetNotice(), r.stdout, r.stderr, r.result];
 				if (r.status === "error" && r.error) {
 					sections.push(
 						[`${r.error.name}: ${r.error.message}`, ...r.error.stack.slice(0, ERROR_STACK_LINES)].join("\n"),
