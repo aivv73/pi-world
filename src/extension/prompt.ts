@@ -38,6 +38,17 @@ const EVALUATOR_CONTROL_PROMPT = [
 	"The final expression of a cell is rendered as its result. Prefer many small cells over one large cell: execute, observe, then continue.",
 ].join("\n");
 
+const CLI_DOCTRINE = [
+	"# CLIs are tools",
+	"",
+	"Anything with a CLI is already a tool surface — the shell is the adapter. Probe `--help` once, wrap the invocation in a small helper kept in the namespace, parse the output into data, and reuse the helper across turns instead of re-deriving the command:",
+	"",
+	"    const gh = async (args: string) => JSON.parse((await Bun.$`gh ${{ raw: args }}`.quiet()).stdout.toString());",
+	'    const prs = await gh("pr list --json number,title");',
+	"",
+	"The same pattern covers `git`, `docker`, `jq`, and aggregators like `runline` (`runline exec '<js>'` exposes configured plugin actions). If a CLI is not on PATH, look for the project and run its entry point directly.",
+].join("\n");
+
 function buildHostToolsSection(summaries: readonly string[]): string {
 	return [
 		"# Host tools",
@@ -47,7 +58,7 @@ function buildHostToolsSection(summaries: readonly string[]): string {
 		...summaries,
 		"",
 		"Prefer `tools.edit({ path, oldText, newText })` over rewriting files with Bun.write: it fails loudly when oldText is stale instead of silently reverting content you have not seen.",
-		"Prefer `tools.read({ path })` over `Bun.file(path).text()` for source files and anything that might be an image: it adds line numbers for precise edits, enforces size caps, and renders images so you can see them.",
+		"Prefer `tools.read({ path })` over `Bun.file(path).text()` for source files and anything that might be an image: it enforces size caps with continuation offsets and renders images so you can see them. Its `text` may end with bracketed reader notices; parse `raw` instead, which is the content alone.",
 		"`Bun.$` remains the way to run shell commands; `tools.bash` exists mainly for parity and timeouts.",
 	].join("\n");
 }
@@ -103,7 +114,7 @@ export function buildRlmTsPrompt(options: RlmPromptOptions): string {
 		parts.push("", SUBAGENT_GUIDANCE);
 	}
 
-	parts.push("", EVALUATOR_CONTROL_PROMPT);
+	parts.push("", EVALUATOR_CONTROL_PROMPT, "", CLI_DOCTRINE);
 
 	if (options.toolSummaries && options.toolSummaries.length > 0) {
 		parts.push("", buildHostToolsSection(options.toolSummaries));

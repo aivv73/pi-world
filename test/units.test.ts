@@ -217,10 +217,22 @@ describe("system prompt", () => {
 		expect(buildRlmTsPrompt({ cwd: "/tmp" })).not.toContain("# Host tools");
 	});
 
+	test("CLI doctrine: probe once, wrap in a namespace helper, parse as data", () => {
+		const prompt = buildRlmTsPrompt({ cwd: "/tmp" });
+		expect(prompt).toContain("# CLIs are tools");
+		expect(prompt).toContain("--help");
+		expect(prompt).toContain("runline exec");
+		// The pattern, not a manual: one example, kept short.
+		expect(prompt.split("# CLIs are tools")[1]?.split("\n").length).toBeLessThan(12);
+	});
+
 	test("no unresolved template placeholders leak into the prompt", () => {
 		const prompt = buildRlmTsPrompt({ cwd: "/tmp", depth: 1 });
 		expect(prompt).not.toContain("undefined");
-		expect(prompt).not.toMatch(/\$\{/);
+		// A leak looks like ${cwd} — a bare identifier that should have been
+		// interpolated. The CLI doctrine's example legitimately shows Bun.$
+		// interpolation syntax, so the guard matches leak shapes, not all ${.
+		expect(prompt).not.toMatch(/\$\{[A-Za-z_][\w.]*\}/);
 	});
 });
 

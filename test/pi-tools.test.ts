@@ -117,6 +117,22 @@ describe("pi tools bridge", () => {
 		expect(host.drainImages()).toHaveLength(0);
 	});
 
+	test("read replies carry raw content without reader notices", async () => {
+		// A truncated read appends "[N more lines...]" guidance into text — right
+		// for a transcript, fatal for JSON.parse. raw is the content alone.
+		const dir = workspace();
+		writeFileSync(join(dir, "data.json"), '{"answer": 42}');
+		writeFileSync(join(dir, "long.txt"), Array.from({ length: 40 }, (_, i) => `row ${i}`).join("\n"));
+		const { m } = bridgedEngine(dir);
+		const r = await m.execute(
+			'const whole = await tools.read({ path: "data.json" });\n' +
+				'const part = await tools.read({ path: "long.txt", limit: 5 });\n' +
+				'`${JSON.parse(whole.raw).answer}|${part.text.includes("more lines")}|${part.raw.endsWith("row 4")}`',
+		);
+		expect(r.status).toBe("ok");
+		expect(r.result).toContain("42|true|true");
+	});
+
 	test("tool details cross the bridge intact", async () => {
 		// pi's tools only attach details when there is something structured to
 		// say — a truncated read attaches truncation facts. Those must arrive in

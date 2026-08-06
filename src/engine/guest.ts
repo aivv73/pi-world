@@ -242,6 +242,8 @@ interface ToolReply extends Record<string, unknown> {
 	text: string;
 	images: number;
 	details: unknown;
+	/** tools.read only: content without trailing bracketed reader notices. */
+	raw?: string;
 }
 
 const TOOLS_HANDLE: Record<string, unknown> = {

@@ -72,6 +72,24 @@ export interface PiToolsHost {
 	describe(): string[];
 }
 
+/**
+ * read mixes reader guidance into its text — trailing bracketed notices like
+ * "[19 more lines in file. Use offset=4 to continue.]" — which is right for a
+ * transcript and wrong for JSON.parse. `raw` is the content alone.
+ */
+export function stripReaderNotices(text: string): string {
+	const lines = text.split("\n");
+	let removed = false;
+	while (lines.length > 0 && /^\[.*\]$/.test(lines[lines.length - 1] ?? "")) {
+		lines.pop();
+		removed = true;
+	}
+	// The blank separator only existed to set the notice apart; a file's own
+	// trailing blank lines are untouched when nothing was stripped.
+	if (removed) while (lines.length > 0 && (lines[lines.length - 1] ?? "").trim() === "") lines.pop();
+	return lines.join("\n");
+}
+
 function buildDefinitions(cwd: string): Map<string, MountedTool> {
 	const defs = [
 		createReadToolDefinition(cwd),
@@ -179,11 +197,13 @@ export function createPiToolsHost(options: { cwd: string }): PiToolsHost {
 					block.type === "image" && typeof block.data === "string" && typeof block.mimeType === "string",
 			);
 			pendingImages.push(...images);
-			return {
+			const reply: Record<string, unknown> = {
 				text,
 				images: images.length,
 				details: (result.details ?? null) as Record<string, unknown> | null,
-			} as Record<string, unknown>;
+			};
+			if (name === "read") reply.raw = stripReaderNotices(text);
+			return reply;
 		},
 	};
 
