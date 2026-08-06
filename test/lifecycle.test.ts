@@ -198,3 +198,79 @@ describe("engine lifecycle over a real engine", () => {
 		rmSync(dir, { recursive: true, force: true });
 	}, 30_000);
 });
+
+describe("engine lifecycle hardening", () => {
+	test("acquire during shutdown waits for the final snapshot flush", async () => {
+		// A rebuild that overlaps a disposing engine's final flush revives a
+		// half-written past. The rebuild must queue behind the teardown.
+		const order: string[] = [];
+		let releaseDispose: () => void = () => {};
+		const lifecycle = new EngineLifecycle<FakeEngine>({
+			create() {
+				order.push("create");
+				return new FakeEngine(snapshotWith(["a"]));
+			},
+			async dispose() {
+				order.push("dispose:start");
+				await new Promise<void>((resolve) => {
+					releaseDispose = resolve;
+				});
+				order.push("dispose:end");
+			},
+		});
+		await lifecycle.acquire("startup");
+		order.length = 0;
+
+		const closing = lifecycle.shutdown();
+		const rebuilding = lifecycle.acquire("cell");
+		await new Promise((r) => setTimeout(r, 20));
+		expect(order).toEqual(["dispose:start"]);
+		releaseDispose();
+		await closing;
+		await rebuilding;
+		expect(order).toEqual(["dispose:start", "dispose:end", "create"]);
+	});
+
+	test("discard skips dispose and the next acquire rebuilds", async () => {
+		// dispose would ask a wedged guest for a snapshot it can never serve;
+		// discard must take the non-cooperative path.
+		const calls: string[] = [];
+		const lifecycle = new EngineLifecycle<FakeEngine>({
+			create: () => new FakeEngine(snapshotWith(["a"])),
+			dispose: async () => {
+				calls.push("dispose");
+			},
+			discard: async () => {
+				calls.push("discard");
+			},
+		});
+		await lifecycle.acquire("startup");
+		await lifecycle.discard();
+		expect(calls).toEqual(["discard"]);
+		const { created } = await lifecycle.acquire("cell");
+		expect(created).toBe(true);
+		expect(lifecycle.takeResetNotice()).toContain("<rlm_engine_reset>");
+	});
+
+	test("discard falls back to dispose when no discard dep is given", async () => {
+		const calls: string[] = [];
+		const lifecycle = new EngineLifecycle<FakeEngine>({
+			create: () => new FakeEngine(null),
+			dispose: async () => {
+				calls.push("dispose");
+			},
+		});
+		await lifecycle.acquire("startup");
+		await lifecycle.discard();
+		expect(calls).toEqual(["dispose"]);
+	});
+
+	test("a snapshot whose every entry failed is reported as such, not as missing", () => {
+		// "No snapshot was available" would send the model looking for the wrong
+		// cause when the snapshot existed and simply would not deserialize.
+		const notice = formatEngineResetNotice(snapshotWith([], ["edit", "spawnSync"]));
+		expect(notice).toContain("nothing in it could be revived");
+		expect(notice).toContain("Failed to revive (2): edit, spawnSync");
+		expect(notice).not.toContain("no snapshot was available");
+	});
+});

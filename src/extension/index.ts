@@ -78,6 +78,14 @@ export default function (pi: ExtensionAPI) {
 			subagents = undefined;
 			await engine.dispose();
 		},
+		// A wedged guest cannot answer the snapshot request dispose would send
+		// (it would stall for the full request timeout, then fail anyway), so a
+		// discard kills outright and relies on the last completed snapshot.
+		async discard(engine) {
+			subagents?.killAll();
+			subagents = undefined;
+			await engine.kill();
+		},
 	});
 
 	// Replace pi's default prompt wholesale. It describes read, bash, and edit
@@ -194,8 +202,15 @@ export default function (pi: ExtensionAPI) {
 				return result;
 			} catch (error) {
 				if (error instanceof EngineBusyError) {
+					// Recovery is this handler's job, not the model's: keeping the
+					// wedged engine cached would make every later cell fail the same
+					// way. Discard it; the next cell acquires a fresh engine revived
+					// from the last completed snapshot and carries the reset notice.
+					await lifecycle.discard();
 					throw new Error(
-						"The evaluator is still wedged by a previously interrupted cell. State was snapshotted; the engine must be restarted.",
+						"The evaluator was wedged by a previously interrupted cell and has been killed. " +
+							"Run the next cell to get a fresh evaluator revived from the last snapshot; " +
+							"anything newer than that snapshot is gone, so re-verify variables before reusing them.",
 					);
 				}
 				throw error;
