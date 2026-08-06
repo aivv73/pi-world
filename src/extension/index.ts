@@ -13,7 +13,7 @@ import { Type } from "typebox";
 import { EngineBusyError, EngineManager } from "../engine/index.js";
 import { buildRlmTsPrompt } from "./prompt.js";
 import { ExecuteCellComponent, type ExecuteDetails, type ExecuteRenderState } from "./render.js";
-import { EngineLifecycle } from "./session-engine.js";
+import { EngineLifecycle, summarizeNames } from "./session-engine.js";
 import { createSubagentHost, type SubagentHost } from "./subagents.js";
 
 const executeSchema = Type.Object({
@@ -44,12 +44,24 @@ function syncRenderState(
 /** Stack lines kept when surfacing a cell error to the model. */
 const ERROR_STACK_LINES = 10;
 
+/** Header plus stack — without repeating the header when the stack already starts with it. */
+function composeErrorLines(error: { name: string; message: string; stack: string[] }): string[] {
+	const header = `${error.name}: ${error.message}`;
+	const stack = error.stack.slice(0, ERROR_STACK_LINES);
+	return stack[0]?.trim() === header ? stack : [header, ...stack];
+}
+
 const DEFAULT_SUBAGENT_MODEL = process.env.PI_RLM_SUBAGENT_MODEL ?? "anthropic/haiku";
 const DEPTH = Number(process.env.PI_RLM_DEPTH ?? "0");
 const MAX_DEPTH = Number(process.env.PI_RLM_MAX_DEPTH ?? "2");
 
 export default function (pi: ExtensionAPI) {
 	let subagents: SubagentHost | undefined;
+	// A tool error must be thrown for pi to mark the call as failed, but pi's
+	// loop rebuilds thrown errors as bare text results, discarding details —
+	// and with them the collapsed header's duration and error name. Stash the
+	// details at throw time and re-attach them in the tool_result hook below.
+	const pendingErrorDetails = new Map<string, ExecuteDetails>();
 	// Where the engine will be built from, captured by whichever event runs first.
 	let location = { cwd: process.cwd(), sessionFile: undefined as string | undefined };
 
@@ -115,8 +127,13 @@ export default function (pi: ExtensionAPI) {
 		if (restore && restore.restored.length > 0) {
 			pi.sendMessage({
 				customType: "pi-rlm-restore",
-				content: `Revived ${restore.restored.length} variable(s) from the previous run: ${restore.restored.join(", ")}${
-					restore.failed.length > 0 ? `. Failed: ${restore.failed.map((f) => f.name).join(", ")}` : ""
+				content: `Revived ${restore.restored.length} variable(s) from the previous run: ${summarizeNames(restore.restored, 8)}${
+					restore.failed.length > 0
+						? `. Failed: ${summarizeNames(
+								restore.failed.map((f) => f.name),
+								8,
+							)}`
+						: ""
 				}`,
 				display: true,
 			});
@@ -125,6 +142,14 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async () => {
 		await lifecycle.shutdown();
+	});
+
+	pi.on("tool_result", async (event) => {
+		if (event.toolName !== "execute") return undefined;
+		const details = pendingErrorDetails.get(event.toolCallId);
+		pendingErrorDetails.delete(event.toolCallId);
+		if (!details || !event.isError) return undefined;
+		return { content: event.content, details, isError: true };
 	});
 
 	pi.registerTool<typeof executeSchema, ExecuteDetails, Partial<ExecuteRenderState>>({
@@ -154,7 +179,7 @@ export default function (pi: ExtensionAPI) {
 			// The call slot renders the whole cell; the result slot contributes nothing.
 			return { render: () => [], invalidate: () => {} };
 		},
-		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			if (ctx?.cwd) location = { cwd: ctx.cwd, sessionFile: ctx.sessionManager?.getSessionFile?.() ?? undefined };
 			// Building the engine here means the previous one went away mid-session;
 			// acquire revives it and arms the notice this cell will carry.
@@ -175,11 +200,8 @@ export default function (pi: ExtensionAPI) {
 				// The session_start chat message is not enough: mid-work it scrolls
 				// past, and the loss only shows up as a variable reading undefined.
 				const sections = [lifecycle.takeResetNotice(), r.stdout, r.stderr, r.result];
-				if (r.status === "error" && r.error) {
-					sections.push(
-						[`${r.error.name}: ${r.error.message}`, ...r.error.stack.slice(0, ERROR_STACK_LINES)].join("\n"),
-					);
-				}
+				const errorLines = r.error ? composeErrorLines(r.error) : undefined;
+				if (r.status === "error" && errorLines) sections.push(errorLines.join("\n"));
 				if (r.status === "aborted") sections.push("[cell aborted]");
 				const text = sections.filter((section) => section !== undefined && section !== "").join("\n");
 
@@ -190,15 +212,16 @@ export default function (pi: ExtensionAPI) {
 					stdout: r.stdout || undefined,
 					stderr: r.stderr || undefined,
 					result: r.result,
-					errorStack: r.error
-						? [`${r.error.name}: ${r.error.message}`, ...r.error.stack.slice(0, ERROR_STACK_LINES)]
-						: undefined,
+					errorStack: errorLines,
 				};
 				const result = {
 					content: [{ type: "text" as const, text: text || "(no output)" }],
 					details,
 				};
-				if (r.status === "error") throw new Error(result.content[0].text);
+				if (r.status === "error") {
+					pendingErrorDetails.set(toolCallId, details);
+					throw new Error(result.content[0].text);
+				}
 				return result;
 			} catch (error) {
 				if (error instanceof EngineBusyError) {

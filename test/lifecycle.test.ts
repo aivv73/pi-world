@@ -15,7 +15,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EngineManager, type RestoreResult } from "../src/engine/index.js";
-import { EngineLifecycle, formatEngineResetNotice, type RevivableEngine } from "../src/extension/session-engine.js";
+import {
+	EngineLifecycle,
+	formatEngineResetNotice,
+	type RevivableEngine,
+	summarizeNames,
+} from "../src/extension/session-engine.js";
 
 class FakeEngine implements RevivableEngine {
 	restoreCalls = 0;
@@ -272,5 +277,24 @@ describe("engine lifecycle hardening", () => {
 		expect(notice).toContain("nothing in it could be revived");
 		expect(notice).toContain("Failed to revive (2): edit, spawnSync");
 		expect(notice).not.toContain("no snapshot was available");
+	});
+});
+
+describe("name summaries", () => {
+	test("short lists are shown whole", () => {
+		expect(summarizeNames(["a", "b"], 8)).toBe("a, b");
+	});
+
+	test("long lists are capped with a count, not a wall", () => {
+		const names = Array.from({ length: 434 }, (_, i) => `v${i}`);
+		const summary = summarizeNames(names, 8);
+		expect(summary).toBe("v0, v1, v2, v3, v4, v5, v6, v7 … and 426 more");
+	});
+
+	test("the reset notice caps its revived list", () => {
+		const names = Array.from({ length: 100 }, (_, i) => `var${i}`);
+		const notice = formatEngineResetNotice({ path: "/tmp/ns.snapshot", restored: names, failed: [] });
+		expect(notice).toContain("… and 80 more");
+		expect(notice.split("\n").length).toBeLessThan(10);
 	});
 });

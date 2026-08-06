@@ -77,6 +77,24 @@ describe("previewCell: shell", () => {
 			text: "bun run build --tar",
 		},
 		{
+			name: "a file write beats the mkdir that prepared for it",
+			code: 'const p = "/tmp/rlm-demo/notes.md";\nawait Bun.$`mkdir -p /tmp/rlm-demo`.quiet();\nawait Bun.write(p, "# notes");',
+			kind: "ts",
+			text: "write /tmp/rlm-demo/notes.md",
+		},
+		{
+			name: "a setup-only shell cell is still a shell cell",
+			code: "await Bun.$`mkdir -p /tmp/scratch`;",
+			kind: "shell",
+			text: "mkdir -p /tmp/scratch",
+		},
+		{
+			name: "trailing redirections are stripped from the descriptor",
+			code: "const out = await Bun.$`bun test test/units.test.ts 2>&1`.quiet();",
+			kind: "shell",
+			text: "bun test test/units.test.ts",
+		},
+		{
 			name: "multiple shell calls: the strongest command wins",
 			code: 'await Bun.$`ls`;\nawait Bun.$`git commit -m "x"`;',
 			kind: "shell",

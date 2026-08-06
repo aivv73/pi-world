@@ -15,6 +15,16 @@
 
 import type { RestoreResult } from "../engine/index.js";
 
+/**
+ * A revived session can carry hundreds of variables; listing them all turns
+ * the banner and the reset notice into a wall. Show enough to orient, then
+ * count the rest.
+ */
+export function summarizeNames(names: readonly string[], limit: number): string {
+	if (names.length <= limit) return names.join(", ");
+	return `${names.slice(0, limit).join(", ")} … and ${names.length - limit} more`;
+}
+
 /** The part of EngineManager this lifecycle needs; narrowed so tests can fake it. */
 export interface RevivableEngine {
 	restoreState(): Promise<RestoreResult | null>;
@@ -53,18 +63,24 @@ export function formatEngineResetNotice(restore: RestoreResult | null): string {
 		lines.push(
 			"The evaluator restarted and a snapshot was found, but nothing in it could be revived.",
 			restore.failed.length > 0
-				? `Failed to revive (${restore.failed.length}): ${restore.failed.map((f) => f.name).join(", ")}`
+				? `Failed to revive (${restore.failed.length}): ${summarizeNames(
+						restore.failed.map((f) => f.name),
+						20,
+					)}`
 				: "The snapshot was empty.",
 			"Every variable from earlier in this session is gone. Rebuild what you need before using it.",
 		);
 	} else {
 		lines.push(
 			"The evaluator restarted. Its namespace was rebuilt from the last snapshot, so it may be behind.",
-			`Revived (${restore.restored.length}): ${restore.restored.join(", ")}`,
+			`Revived (${restore.restored.length}): ${summarizeNames(restore.restored, 20)}`,
 		);
 		if (restore.failed.length > 0) {
 			lines.push(
-				`Lost (${restore.failed.length}): ${restore.failed.map((f) => f.name).join(", ")}`,
+				`Lost (${restore.failed.length}): ${summarizeNames(
+					restore.failed.map((f) => f.name),
+					20,
+				)}`,
 				"Functions, classes, and live handles cannot be snapshotted; redefine them.",
 			);
 		}

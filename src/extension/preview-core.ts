@@ -167,6 +167,25 @@ function simplifyShellLine(line: string): string {
 	return simplifyRunnerCommand(line) ?? simplifyMutationCommand(line) ?? line;
 }
 
+/**
+ * Commands that prepare the ground rather than do the work. A cell that mkdirs
+ * and then writes a file is a write; the shell only wins when it is the story.
+ */
+const SHELL_SETUP_WORDS = new Set([
+	"mkdir",
+	"cd",
+	"export",
+	"touch",
+	"chmod",
+	"chown",
+	"ln",
+	"echo",
+	"true",
+	"sleep",
+	"which",
+	"sync",
+]);
+
 const SHELL_ACTION_WORDS = new Set([
 	"rm",
 	"mv",
@@ -253,9 +272,12 @@ function previewShellCommandScored(command: string): { text: string; strength: n
 		}
 	}
 	if (!best) return { text: "", strength: 0 };
+	// Trailing redirections are plumbing, not intent, and they eat descriptor
+	// budget ("bun test test/ 2…").
+	const cleaned = best.text.replace(/(?:\s*(?:2>&1|[12]?>\s*\/dev\/null|&>\s*\/dev\/null))+\s*$/, "");
 	// A stripped cd prefix still matters — "bun test" somewhere else is a
 	// different fact from "bun test" here.
-	const text = cwdSuffix && !best.text.includes(cwdSuffix) ? best.text + " (" + cwdSuffix + ")" : best.text;
+	const text = cwdSuffix && !cleaned.includes(cwdSuffix) ? cleaned + " (" + cwdSuffix + ")" : cleaned;
 	return { text: descriptor(text), strength: best.score };
 }
 
@@ -282,8 +304,11 @@ function shellCandidates(
 		const command = previewShellCommandScored(substituteVars(span.body, vars));
 		// The command's own strength breaks ties between several shell calls in
 		// one cell, scaled to stay inside the shell band (below agent's 100).
+		// Setup-only commands drop below file effects: they serve the real work.
 		if (command.text) {
-			candidates.push({ kind: "shell", text: command.text, score: 90 + Math.min(command.strength, 200) / 25 });
+			const setupOnly = SHELL_SETUP_WORDS.has(shellWords(command.text)[0] ?? "");
+			const score = setupOnly ? 72 : 90 + Math.min(command.strength, 200) / 25;
+			candidates.push({ kind: "shell", text: command.text, score });
 		}
 		masked = maskSpan(masked, span);
 		SHELL_OPEN_PATTERN.lastIndex = span.end;
@@ -381,7 +406,7 @@ function fileCandidates(source: string, vars: ReadonlyMap<string, string>): Cand
 		const verb = FILE_EFFECT_VERBS.find(([name]) => call.includes(name))?.[1];
 		if (!verb) continue;
 		const path = resolveArgText(match[1] ?? "", vars);
-		if (path) candidates.push({ kind: "ts", text: descriptor(verb + " " + path), score: 85 });
+		if (path) candidates.push({ kind: "ts", text: descriptor(verb + " " + path), score: 95 });
 	}
 	for (const match of source.matchAll(FILE_READ_PATTERN)) {
 		const path = resolveArgText(match[1] ?? "", vars);
