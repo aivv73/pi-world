@@ -171,6 +171,11 @@ describe("system prompt", () => {
 		expect(prompt).toContain("Recursive agent depth: 0");
 		expect(prompt).toContain("Bun.$");
 		expect(prompt).toContain("persist");
+		// The reset notice is only useful if the model knows what to do with it:
+		// re-verify before reuse, and above all before shell interpolation.
+		expect(prompt).toContain("<rlm_engine_reset>");
+		expect(prompt).toContain("re-verify");
+		expect(prompt).toContain("shell command");
 	});
 
 	test("subagent guidance appears only when recursion is allowed", () => {

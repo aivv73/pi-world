@@ -31,6 +31,8 @@ const EVALUATOR_CONTROL_PROMPT = [
 	"",
 	"Evaluator state persists across cells and tool calls: top-level variables, functions, classes, imports, notes, parsed outputs, and helper data structures all remain available in every later turn, and are revived on a best-effort basis when a session resumes. Tool calls are themselves `await` expressions, so their return values can be bound to variables and composed into program logic like any other call.",
 	"",
+	"If a cell result begins with an `<rlm_engine_reset>` block, the evaluator restarted and its namespace was rebuilt from a snapshot: re-verify any variable named there before reusing it, and never interpolate one into a shell command until you have confirmed it still holds what you expect.",
+	"",
 	"The final expression of a cell is rendered as its result. Prefer many small cells over one large cell: execute, observe, then continue.",
 ].join("\n");
 
