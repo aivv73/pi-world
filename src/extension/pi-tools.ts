@@ -34,7 +34,7 @@ interface MountedTool {
 	description: string;
 	parameters: {
 		required?: string[];
-		properties?: Record<string, { type?: string; description?: string }>;
+		properties?: Record<string, SchemaProperty>;
 	};
 	execute(
 		toolCallId: string,
@@ -43,6 +43,12 @@ interface MountedTool {
 		onUpdate: undefined,
 		ctx: undefined,
 	): Promise<{ content: ContentBlock[]; details: unknown }>;
+}
+
+interface SchemaProperty {
+	type?: string;
+	description?: string;
+	items?: { required?: string[]; properties?: Record<string, SchemaProperty> };
 }
 
 export interface ContentBlock {
@@ -79,11 +85,24 @@ function buildDefinitions(cwd: string): Map<string, MountedTool> {
 	return new Map(defs.map((def) => [def.name, def]));
 }
 
+function propertyType(prop: SchemaProperty): string {
+	// One level of array-item expansion: "edits: array" invites a wrong guess
+	// at the item shape, "edits: [{ oldText: string, newText: string }]" does not.
+	if (prop.type === "array" && prop.items?.properties) {
+		const itemRequired = new Set(prop.items.required ?? []);
+		const fields = Object.entries(prop.items.properties)
+			.map(([name, item]) => `${name}${itemRequired.has(name) ? "" : "?"}: ${item.type ?? "unknown"}`)
+			.join(", ");
+		return `[{ ${fields} }]`;
+	}
+	return prop.type ?? "unknown";
+}
+
 /** `read({ path: string, offset?: number, limit?: number })` — from the schema, so it never drifts. */
 export function toolSignature(def: MountedTool): string {
 	const required = new Set(def.parameters.required ?? []);
 	const params = Object.entries(def.parameters.properties ?? {})
-		.map(([name, prop]) => `${name}${required.has(name) ? "" : "?"}: ${prop.type ?? "unknown"}`)
+		.map(([name, prop]) => `${name}${required.has(name) ? "" : "?"}: ${propertyType(prop)}`)
 		.join(", ");
 	return `${def.name}({ ${params} })`;
 }

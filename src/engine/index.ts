@@ -354,7 +354,13 @@ export class EngineManager {
 	// ── guest messaging ────────────────────────────────────────────────────────
 
 	private sendToGuest(message: HostToGuestMessage): void {
-		this.child?.stdin?.write(encodeMessage(message, this.nonce));
+		// A write into a dying child's stdin can throw synchronously. A dead pipe
+		// here only ever means "engine gone", which every caller already learns
+		// through the exit path — a late host reply must not become an unhandled
+		// rejection inside dispatchHostRequest's own error handler.
+		try {
+			this.child?.stdin?.write(encodeMessage(message, this.nonce));
+		} catch {}
 	}
 
 	private request(message: HostToGuestMessage & { id: string }, timeoutMs: number): Promise<GuestToHostMessage> {

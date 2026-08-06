@@ -51,6 +51,11 @@ describe("pi tools bridge", () => {
 		}
 		// Signatures come from the TypeBox schemas, not hand-written strings.
 		expect(described.find((line) => line.startsWith("tools.read("))).toContain("path: string");
+		// Array parameters expand one item level: "edits: array" invites a wrong
+		// guess at the shape; the expanded form answers it.
+		expect(described.find((line) => line.startsWith("tools.edit("))).toContain(
+			"edits: [{ oldText: string, newText: string }]",
+		);
 	});
 
 	test("round-trip: a cell reads a file through the bridge and gets text plus details", async () => {

@@ -60,10 +60,14 @@ export default function (pi: ExtensionAPI) {
 	let subagents: SubagentHost | undefined;
 	let piTools: PiToolsHost | undefined;
 	// A tool error must be thrown for pi to mark the call as failed, but pi's
-	// loop rebuilds thrown errors as bare text results, discarding details —
-	// and with them the collapsed header's duration and error name. Stash the
-	// details at throw time and re-attach them in the tool_result hook below.
-	const pendingErrorDetails = new Map<string, ExecuteDetails>();
+	// loop rebuilds thrown errors as bare text results, discarding details and
+	// content — and with them the collapsed header's metadata and any images a
+	// bridged tool produced before the cell failed. Stash both at throw time
+	// and re-attach them in the tool_result hook below.
+	const pendingErrorResults = new Map<
+		string,
+		{ details: ExecuteDetails; images: Array<{ type: "image"; data: string; mimeType: string }> }
+	>();
 	// Where the engine will be built from, captured by whichever event runs first.
 	let location = { cwd: process.cwd(), sessionFile: undefined as string | undefined };
 
@@ -152,10 +156,12 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("tool_result", async (event) => {
 		if (event.toolName !== "execute") return undefined;
-		const details = pendingErrorDetails.get(event.toolCallId);
-		pendingErrorDetails.delete(event.toolCallId);
-		if (!details || !event.isError) return undefined;
-		return { content: event.content, details, isError: true };
+		const stashed = pendingErrorResults.get(event.toolCallId);
+		pendingErrorResults.delete(event.toolCallId);
+		if (!stashed || !event.isError) return undefined;
+		// Images ride along: a tool that read a PNG succeeded even if the cell
+		// later threw, and the model should still see what it read.
+		return { content: [...event.content, ...stashed.images], details: stashed.details, isError: true };
 	});
 
 	pi.registerTool<typeof executeSchema, ExecuteDetails, Partial<ExecuteRenderState>>({
@@ -231,7 +237,10 @@ export default function (pi: ExtensionAPI) {
 					details,
 				};
 				if (r.status === "error") {
-					pendingErrorDetails.set(toolCallId, details);
+					pendingErrorResults.set(toolCallId, {
+						details,
+						images: images.map((image) => ({ type: "image" as const, data: image.data, mimeType: image.mimeType })),
+					});
 					throw new Error(text || "(no output)");
 				}
 				return result;
