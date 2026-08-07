@@ -26,7 +26,7 @@ import {
 	createLsToolDefinition,
 	createReadToolDefinition,
 	createWriteToolDefinition,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import { Value } from "typebox/value";
 import type { HostRequestHandlers } from "../engine/index.js";
 

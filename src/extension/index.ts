@@ -8,7 +8,7 @@
  */
 
 import { basename, join } from "node:path";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { EngineBusyError, EngineManager } from "../engine/index.js";
 import { createPiToolsHost, type PiToolsHost } from "./pi-tools.js";

@@ -5,8 +5,8 @@
  * pure layout in render-core.ts, which is unit-tested outside pi's runtime.
  */
 
-import { highlightCode, keyHint, type Theme } from "@mariozechner/pi-coding-agent";
-import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@mariozechner/pi-tui";
+import { highlightCode, keyHint, type Theme } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { type BgKind, type ExecuteRenderState, type RenderDeps, renderExecuteCell, statusKind } from "./render-core.js";
 
 export type { ExecuteDetails, ExecuteRenderState } from "./render-core.js";
