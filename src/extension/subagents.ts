@@ -51,11 +51,24 @@ export interface SubagentHostOptions {
 export const MAX_SUBAGENT_NAME_LENGTH = 64;
 
 /**
+ * Each provider's cheap fan-out tier, in preference order. Fan-out economics
+ * only work at volume prices: inheriting the parent would run children at
+ * flagship rates while a 25x cheaper model sits in the same account (sol at
+ * $5/$30 vs luna at $0.20/$1.20 per MTok). An entry applies only when a
+ * model matching its pattern is actually listed as available — never assumed
+ * from the provider merely being present.
+ */
+const CHEAP_TIER = [
+	{ model: "anthropic/haiku", listed: /^anthropic\/(claude-)?haiku/ },
+	{ model: "openai/gpt-5.6-luna", listed: /^openai\/gpt-5\.6-luna$/ },
+] as const;
+
+/**
  * What children run when rlm.run names no model. A hardcoded default breaks
  * every session whose auth cannot spawn it, so the choice degrades: explicit
- * override, then the cheap anthropic default when anthropic is actually
- * available, then the parent's own model — valid by construction. The bare
- * fallback only applies when nothing is known, where any guess fails equally.
+ * override, then the first cheap tier whose model is actually available,
+ * then the parent's own model — valid by construction. The bare fallback
+ * only applies when nothing is known, where any guess fails equally.
  */
 export function resolveDefaultSubagentModel(options: {
 	override?: string;
@@ -63,7 +76,9 @@ export function resolveDefaultSubagentModel(options: {
 	current?: string;
 }): string {
 	if (options.override) return options.override;
-	if (options.available.some((entry) => entry.startsWith("anthropic/"))) return "anthropic/haiku";
+	for (const tier of CHEAP_TIER) {
+		if (options.available.some((entry) => tier.listed.test(entry))) return tier.model;
+	}
 	return options.current ?? "anthropic/haiku";
 }
 

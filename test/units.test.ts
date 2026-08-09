@@ -277,23 +277,40 @@ describe("system prompt", () => {
 
 	// A hardcoded child default breaks every session whose auth cannot spawn
 	// it, and the prompt would teach the broken default confidently. The env
-	// override wins; the cheap anthropic default applies only when anthropic
-	// is actually available; otherwise children inherit the parent's model,
-	// which is valid by construction.
-	test("the subagent default degrades from override to cheap to inherit", () => {
-		const available = ["openai/gpt-5.2", "openai/gpt-5-mini"];
-		expect(resolveDefaultSubagentModel({ override: "openai/gpt-5-mini", available, current: "openai/gpt-5.2" })).toBe(
-			"openai/gpt-5-mini",
-		);
+	// override wins; then each provider's cheap fan-out tier (haiku, luna)
+	// when that provider is actually available — inheriting the parent would
+	// mean children at flagship prices while a 25x cheaper volume model sits
+	// in the same account. Inherit is the fallback, valid by construction;
+	// the bare default only applies when nothing is known and any guess
+	// fails equally.
+	test("the subagent default degrades from override to provider-cheap to inherit", () => {
+		const openaiOnly = ["openai/gpt-5.6-sol", "openai/gpt-5.6-luna"];
 		expect(
 			resolveDefaultSubagentModel({
-				available: ["anthropic/claude-haiku-4-5", ...available],
-				current: "openai/gpt-5.2",
+				override: "openai/gpt-5-mini",
+				available: openaiOnly,
+				current: "openai/gpt-5.6-sol",
+			}),
+		).toBe("openai/gpt-5-mini");
+		// Anthropic present: haiku, regardless of what else is available.
+		expect(
+			resolveDefaultSubagentModel({
+				available: ["anthropic/claude-haiku-4-5", ...openaiOnly],
+				current: "openai/gpt-5.6-sol",
 			}),
 		).toBe("anthropic/haiku");
-		expect(resolveDefaultSubagentModel({ available, current: "openai/gpt-5.2" })).toBe("openai/gpt-5.2");
-		// Nothing known at all: the historical default, which start-up reporting
-		// will surface as a spawn failure rather than a silent wrong guess.
+		// OpenAI only: luna, not the parent's sol.
+		expect(resolveDefaultSubagentModel({ available: openaiOnly, current: "openai/gpt-5.6-sol" })).toBe(
+			"openai/gpt-5.6-luna",
+		);
+		// A provider with no known cheap tier: inherit the parent.
+		expect(resolveDefaultSubagentModel({ available: ["google/gemini-3-pro"], current: "google/gemini-3-pro" })).toBe(
+			"google/gemini-3-pro",
+		);
+		// The cheap tier must actually be listed, not assumed from the provider.
+		expect(resolveDefaultSubagentModel({ available: ["openai/gpt-5.6-sol"], current: "openai/gpt-5.6-sol" })).toBe(
+			"openai/gpt-5.6-sol",
+		);
 		expect(resolveDefaultSubagentModel({ available: [] })).toBe("anthropic/haiku");
 	});
 
