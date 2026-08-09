@@ -36,6 +36,15 @@ const ABORT_GRACE_MS = 500;
 const PING_TIMEOUT_MS = 5_000;
 const DEFAULT_SNAPSHOT_DEBOUNCE_MS = 1500;
 const SNAPSHOT_REQUEST_TIMEOUT_MS = 30_000;
+/**
+ * How many recent cells stay resolvable for late bridge calls.
+ *
+ * A cancelled cell's continuation can reach the bridge long after the host has
+ * settled it, and that request still needs its own signal and source. Keeping
+ * the records bounded means an orphan stays attributable for a while without
+ * the map growing for the life of the session.
+ */
+const MAX_CELL_RECORDS = 64;
 
 export interface EngineExecuteError {
 	/** Error class name, e.g. "TypeError". */
@@ -65,8 +74,15 @@ export interface ExecuteOptions {
 
 /** Passed alongside a host request's payload. */
 export interface HostRequestContext {
-	/** Aborts when the cell that (transitively) issued the request is cancelled. */
-	signal?: AbortSignal;
+	/**
+	 * Aborts when the cell that issued this request is cancelled, or when that
+	 * cell settles for any other reason — work outliving its cell is orphaned.
+	 *
+	 * Always present. A request whose cell is too old to still be tracked
+	 * arrives already aborted rather than without a signal, so a handler never
+	 * has to decide what an absent signal means.
+	 */
+	signal: AbortSignal;
 }
 
 /** Handles one typed request from guest code. Reply is sent back verbatim. */
@@ -183,7 +199,8 @@ export class EngineManager {
 	/** Held so the protocol reader is not garbage-collected mid-session, which
 	 * would close the guest's write end and kill it with EPIPE. */
 	private protocolReader?: ReturnType<typeof createInterface>;
-	private lastCellCode?: string;
+	/** Abort + source per cell, retained past settlement for late bridge calls. */
+	private readonly cellRecords = new Map<string, { hostAbort: AbortController; code: string }>();
 	/** Set when an aborted cell may still be wedging the guest's event loop. */
 	private maybeWedged = false;
 	private snapshotTimer?: ReturnType<typeof setTimeout>;
@@ -429,7 +446,7 @@ export class EngineManager {
 				break;
 			}
 			case "host_request": {
-				void this.dispatchHostRequest(message.id, message.requestType, message.payload);
+				void this.dispatchHostRequest(message.id, message.cellId, message.requestType, message.payload);
 				break;
 			}
 		}
@@ -443,21 +460,50 @@ export class EngineManager {
 		pending.resolve(message);
 	}
 
-	private async dispatchHostRequest(id: string, requestType: string, payload: Record<string, unknown>): Promise<void> {
+	private async dispatchHostRequest(
+		id: string,
+		cellId: string,
+		requestType: string,
+		payload: Record<string, unknown>,
+	): Promise<void> {
 		try {
 			const handler = this.options.hostHandlers?.[requestType];
 			if (!handler) {
 				throw new Error(`host request type "${requestType}" is not available in this session`);
 			}
-			// Attribute the request to the cell that (transitively) issued it, and
-			// hand it that cell's abort signal so host-side work (a bridged bash
-			// call, a subprocess) stops when the cell does.
-			const cellSourceCode = this.activeExecution?.code ?? this.lastCellCode;
-			const reply = await handler({ ...payload, cellSourceCode }, { signal: this.activeExecution?.hostAbort.signal });
+			// Attribute the request to the cell that issued it, and hand it that
+			// cell's abort signal so host-side work (a bridged bash call, a
+			// subprocess) stops when the cell does.
+			//
+			// Resolving either from activeExecution would be wrong for the case that
+			// matters most: a cancelled cell is force-settled after ABORT_GRACE_MS,
+			// but its continuation keeps running and can still call the bridge. By
+			// then activeExecution is undefined or belongs to a different cell, so
+			// the request would be attributed to a program that never asked for it
+			// and given no signal at all - host work spawned by a cell the agent has
+			// already cancelled, which nothing can then cancel.
+			const record = this.cellRecords.get(cellId);
+			// A cell we no longer have a record for is old enough to be an orphan.
+			// Refusing to grant an open-ended signal is the safe reading, and the
+			// source is reported as unknown rather than guessed: naming the most
+			// recent cell instead would be the same misattribution this exists to
+			// prevent, only harder to notice because it looks like an answer.
+			const signal = record ? record.hostAbort.signal : AbortSignal.abort();
+			const reply = await handler({ ...payload, cellSourceCode: record?.code }, { signal });
 			this.sendToGuest({ type: "host_reply", id, status: "ok", payload: reply });
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.sendToGuest({ type: "host_reply", id, status: "error", error: message });
+		}
+	}
+
+	private rememberCell(cellId: string, hostAbort: AbortController, code: string): void {
+		this.cellRecords.set(cellId, { hostAbort, code });
+		// Map iteration is insertion-ordered, so the oldest record is the first key.
+		while (this.cellRecords.size > MAX_CELL_RECORDS) {
+			const oldest = this.cellRecords.keys().next().value;
+			if (oldest === undefined) break;
+			this.cellRecords.delete(oldest);
 		}
 	}
 
@@ -535,7 +581,6 @@ export class EngineManager {
 	private executeInner(code: string, opts: ExecuteOptions): Promise<ExecuteResult> {
 		const cellId = randomUUID();
 		const started = Date.now();
-		this.lastCellCode = code;
 
 		return new Promise<ExecuteResult>((resolve, reject) => {
 			const active: ActiveExecution = {
@@ -556,6 +601,7 @@ export class EngineManager {
 				reject,
 			};
 			this.activeExecution = active;
+			this.rememberCell(cellId, active.hostAbort, code);
 
 			let graceTimer: ReturnType<typeof setTimeout> | undefined;
 			const onAbort = () => {
@@ -594,6 +640,10 @@ export class EngineManager {
 		if (active.settled) return;
 		active.settled = true;
 		if (this.activeExecution === active) this.activeExecution = undefined;
+		// The cell is over, so any host work still running on its behalf is
+		// orphaned. Firing the signal here means a late bridge call sees an
+		// already-cancelled cell rather than an open-ended one.
+		active.hostAbort.abort();
 
 		// A cancelled cell reports "aborted" even if it happened to finish first:
 		// the caller withdrew interest, so the value is not theirs to consume.
