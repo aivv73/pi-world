@@ -25,8 +25,10 @@ host can always report what happened because it is not the thing that failed.
    await, so concurrent callers run in submission order rather than in whatever
    order their startup happened to finish.
 3. The guest transforms the source: types stripped, top-level declarations
-   rewritten to assignments, imports rewritten to awaited dynamic imports, and a
-   trailing expression captured as the result.
+   rewritten to assignments, imports rewritten to awaited dynamic imports
+   (`npm:` specifiers route through the guest's lazy install cache instead,
+   since Bun's runtime cannot resolve them), and a trailing expression captured
+   as the result.
 4. The body runs inside `with (proxy)` in an async function. Ordinary
    assignments become namespace entries; ordinary reads resolve against the
    namespace, then the global scope.

@@ -11,6 +11,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parseNpmSpecifier } from "../src/engine/npm.js";
 import { decodeMessage, encodeMessage } from "../src/engine/protocol.js";
 import { transformCell } from "../src/engine/transform.js";
 import { buildRlmTsPrompt } from "../src/extension/prompt.js";
@@ -85,6 +86,22 @@ describe("transform: imports", () => {
 		expect(declaredNames).toEqual([]);
 	});
 
+	test("npm: specifiers route through the cell context importer, not import()", () => {
+		// Bun's runtime cannot resolve npm: specifiers, so a plain import() would
+		// throw. The guest owns the cache importer; the transform routes to it.
+		const { body, declaredNames } = transformCell('import { z } from "npm:zod@4";', { ctxName: "__ctx" });
+		expect(body).toContain('await __ctx.importModule("npm:zod@4")');
+		expect(body).not.toContain('import("npm:zod@4")');
+		expect(declaredNames).toEqual(["z"]);
+	});
+
+	test("npm: routing covers namespace and side-effect-only forms", () => {
+		const namespaced = transformCell('import * as z from "npm:zod@4";', { ctxName: "__ctx" });
+		expect(namespaced.body).toContain('z = await __ctx.importModule("npm:zod@4")');
+		const bare = transformCell('import "npm:zod@4";', { ctxName: "__ctx" });
+		expect(bare.body).toContain('await __ctx.importModule("npm:zod@4")');
+	});
+
 	test("export statements are rejected with a clear SyntaxError", () => {
 		expect(() => transformCell("export const nope = 1;")).toThrow(/export/i);
 		expect(() => transformCell("export default 1;")).toThrow(/export/i);
@@ -136,6 +153,57 @@ describe("transform: syntax edge cases", () => {
 	});
 });
 
+// ── npm specifiers ────────────────────────────────────────────────────────────
+// Parsing is the security boundary: the name reaches a generated package.json
+// and the resolver, so anything that is not a plain npm package name must be
+// rejected before it can name a path or a dependency.
+
+describe("npm specifier parsing", () => {
+	test("bare name defaults to latest with no subpath", () => {
+		expect(parseNpmSpecifier("npm:zod")).toEqual({ name: "zod", version: "latest", subpath: "" });
+	});
+
+	test("versions, ranges, and tags stay attached to the name", () => {
+		expect(parseNpmSpecifier("npm:zod@4.1.0")).toEqual({ name: "zod", version: "4.1.0", subpath: "" });
+		expect(parseNpmSpecifier("npm:zod@^4")).toEqual({ name: "zod", version: "^4", subpath: "" });
+		expect(parseNpmSpecifier("npm:zod@beta")).toEqual({ name: "zod", version: "beta", subpath: "" });
+	});
+
+	test("scoped names keep the scope; the version @ is not confused with it", () => {
+		expect(parseNpmSpecifier("npm:@scope/pkg")).toEqual({ name: "@scope/pkg", version: "latest", subpath: "" });
+		expect(parseNpmSpecifier("npm:@scope/pkg@2.0.0")).toEqual({ name: "@scope/pkg", version: "2.0.0", subpath: "" });
+	});
+
+	test("subpaths survive for plain and scoped names", () => {
+		expect(parseNpmSpecifier("npm:lodash-es@4/add.js")).toEqual({
+			name: "lodash-es",
+			version: "4",
+			subpath: "/add.js",
+		});
+		expect(parseNpmSpecifier("npm:@scope/pkg@1/deep/entry")).toEqual({
+			name: "@scope/pkg",
+			version: "1",
+			subpath: "/deep/entry",
+		});
+	});
+
+	test("rejects non-npm specifiers and malformed names", () => {
+		expect(() => parseNpmSpecifier("node:path")).toThrow(/npm:/);
+		expect(() => parseNpmSpecifier("npm:")).toThrow();
+		expect(() => parseNpmSpecifier("npm:@scope")).toThrow();
+		expect(() => parseNpmSpecifier("npm:zod@")).toThrow();
+	});
+
+	test("rejects names that could escape into the filesystem", () => {
+		expect(() => parseNpmSpecifier("npm:../evil")).toThrow();
+		expect(() => parseNpmSpecifier("npm:..")).toThrow();
+		expect(() => parseNpmSpecifier("npm:.")).toThrow();
+		expect(() => parseNpmSpecifier(String.raw`npm:name\bad`)).toThrow();
+		expect(() => parseNpmSpecifier(String.raw`npm:zod@1.0.0\evil`)).toThrow();
+		expect(() => parseNpmSpecifier("npm:@scope/../evil")).toThrow();
+	});
+});
+
 // ── protocol ──────────────────────────────────────────────────────────────────
 
 describe("protocol framing", () => {
@@ -176,6 +244,12 @@ describe("system prompt", () => {
 		expect(prompt).toContain("<rlm_engine_reset>");
 		expect(prompt).toContain("re-verify");
 		expect(prompt).toContain("shell command");
+	});
+
+	test("advertises npm: imports so the agent reaches for them before bun add", () => {
+		const prompt = buildRlmTsPrompt({ cwd: "/tmp" });
+		expect(prompt).toContain('import { z } from "npm:zod@4"');
+		expect(prompt).toContain("isolated cache");
 	});
 
 	test("subagent guidance appears only when recursion is allowed", () => {

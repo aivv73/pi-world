@@ -81,6 +81,34 @@ describe("persistence", () => {
 		expect(r.status).toBe("ok");
 		expect(r.result).toContain("a/b");
 	});
+
+	// npm: specifiers extend the same guarantee to packages the project does not
+	// depend on: the first import installs into an isolated cache instead of
+	// mutating the project's node_modules, and the binding persists like any
+	// other import. Pinned to the version the repo already depends on so the
+	// install is served from Bun's local cache in the common case.
+	test("npm: imports install lazily into the cache and persist across cells", async () => {
+		const m = engine({ env: { PI_RLM_NPM_CACHE_DIR: tempDir() } });
+		const first = await m.execute(
+			'import { parse } from "npm:acorn@8.18.0";\nparse("let x = 1", { ecmaVersion: "latest" }).body[0].type',
+		);
+		expect(first.status).toBe("ok");
+		expect(first.result).toContain("VariableDeclaration");
+
+		const second = await m.execute('parse("const y = 2", { ecmaVersion: "latest" }).body[0].type');
+		expect(second.status).toBe("ok");
+		expect(second.result).toContain("VariableDeclaration");
+	});
+
+	// A malformed specifier must fail as an ordinary cell error — before any
+	// install runs — and leave the engine usable.
+	test("a malformed npm: specifier fails the cell, not the engine", async () => {
+		const m = engine({ env: { PI_RLM_NPM_CACHE_DIR: tempDir() } });
+		const bad = await m.execute('import { x } from "npm:../evil";');
+		expect(bad.status).toBe("error");
+		expect(bad.error?.message).toContain("npm:../evil");
+		expect((await m.execute("1 + 1")).result).toContain("2");
+	});
 });
 
 // ── 2. Top-level await ────────────────────────────────────────────────────────

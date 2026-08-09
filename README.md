@@ -92,9 +92,27 @@ pi --rlm -e ./src/extension/index.ts
 | `PI_RLM_SUBAGENT_MODEL` | `anthropic/haiku` | Model children are spawned with |
 | `PI_RLM_MAX_DEPTH` | `2` | How deep recursive delegation may go |
 | `PI_RLM_DEPTH` | `0` | Depth of the current agent; set on children automatically |
+| `PI_RLM_NPM_CACHE_DIR` | `~/.cache/pi-rlm-npm` | Where `npm:` imports install |
 
 Session state lives in `.pi-rlm/<session>/`: the namespace snapshot and each
 subagent's session file and output.
+
+### npm imports
+
+Static top-level imports can name npm packages directly:
+
+```ts
+import { z } from "npm:zod@4";
+import { format } from "npm:date-fns@4/format";
+```
+
+The first import of a `name@version` installs it into an isolated cache
+directory — the working directory's `node_modules` is never touched — and the
+binding persists across cells like any other import. Pin versions when
+repeatability matters: an unpinned name means `latest`, resolved once at first
+install and reused from the cache after that. Specifiers are
+code-execution input: importing a package runs its code. Dynamic
+`import("npm:...")` is not supported.
 
 ## How it works
 
@@ -127,6 +145,7 @@ src/engine/      the evaluator
   guest.ts       the Bun process that owns the namespace and runs cells
   protocol.ts    typed, authenticated framing between the two
   transform.ts   cell source → executable body
+  npm.ts         lazy, isolated installs behind npm: imports
 src/extension/   the pi integration
   index.ts       tool registration, session wiring
   prompt.ts      the system prompt

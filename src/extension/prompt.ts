@@ -89,7 +89,7 @@ export function buildRlmTsPrompt(options: RlmPromptOptions): string {
 		`Conversation log: ${(options.messagesPath ?? "not persisted").replace(/\\/g, "/")}`,
 		`Recursive agent depth: ${depth}`,
 		`Current date: ${date}`,
-		"The evaluator is Bun (TypeScript). The full Bun and Node standard libraries are available; install additional packages with `await Bun.$`bun add <pkg>`.quiet()` only when genuinely needed.",
+		'The evaluator is Bun (TypeScript). The full Bun and Node standard libraries are available. For an extra package, prefer a static versioned npm import — `import { z } from "npm:zod@4"` (subpaths work: `"npm:date-fns@4/format"`) — which installs lazily into an isolated cache without touching the working directory; dynamic `import("npm:...")` is not supported. Fall back to `await Bun.$`bun add <pkg>`.quiet()` only when that is genuinely the right tool.',
 	];
 
 	const childDoctrine = buildChildDoctrine(options);
