@@ -11,9 +11,10 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { EngineBusyError, EngineManager } from "../src/engine/index.js";
 
 const managers: EngineManager[] = [];
@@ -397,6 +398,41 @@ describe("lifecycle", () => {
 		await expect(m.execute("2+2")).rejects.toThrow(/shut down/i);
 	});
 
+	// A long session cycles engines (wedge recovery, reloads); one leaked
+	// descriptor per lifecycle is a slow death by EMFILE, invisible to every
+	// single-engine test. The guarantee is measured under Node because that is
+	// the production host: pi runs the engine in Node, where a SIGKILL'd
+	// child's stdio is reclaimed cleanly. Bun — this suite's runtime — leaks
+	// one descriptor per killed child and cannot close its ends of the pipes
+	// without corrupting its own spawn machinery (any close poisons later
+	// 4-pipe spawns with "Failed to connect ENOENT"), so measuring here would
+	// test the harness, not the engine.
+	test("an engine lifecycle returns every descriptor it borrowed (under Node, the production host)", async () => {
+		const dir = tempDir();
+		const engineDir = fileURLToPath(new URL("../src/engine/", import.meta.url));
+		await Bun.$`bun build ${join(engineDir, "index.ts")} --target=node --outfile ${join(dir, "index.js")}`.quiet();
+		// The bundled host still spawns the guest from source beside itself.
+		for (const file of readdirSync(engineDir)) {
+			if (file.endsWith(".ts")) copyFileSync(join(engineDir, file), join(dir, file));
+		}
+		const probe = `
+			import { readdirSync } from "node:fs";
+			import { EngineManager } from ${JSON.stringify(join(dir, "index.js"))};
+			const fds = () => readdirSync("/dev/fd").length;
+			const warm = new EngineManager({}); await warm.execute("1"); await warm.kill();
+			await new Promise((r) => setTimeout(r, 150));
+			const before = fds();
+			for (let i = 0; i < 5; i++) { const m = new EngineManager({}); await m.execute("1"); await m.kill(); }
+			await new Promise((r) => setTimeout(r, 300));
+			console.log(JSON.stringify({ growth: fds() - before }));
+			process.exit(0);
+		`;
+		const out = await Bun.$`node --input-type=module -e ${probe}`.quiet();
+		const { growth } = JSON.parse(out.stdout.toString().trim().split("\n").at(-1) ?? "{}");
+		// One leak per engine reads as +5; genuine noise stays under that.
+		expect(growth).toBeLessThan(5);
+	}, 30_000);
+
 	test("kill during an active cell settles the pending execute promise", async () => {
 		const m = engine();
 		const pending = m.execute("await new Promise((r) => setTimeout(r, 60_000));");
@@ -487,6 +523,52 @@ describe("host bridge", () => {
 		expect(seen[0]?.cellId).toBe("cell-under-test");
 		expect(String(seen[0]?.source)).toContain("test.probe");
 	});
+
+	// The record cap (64) is the boundary between "orphan with a story" and
+	// "orphan too old to attribute". Past it, the safe reading applies: the
+	// request arrives already aborted and its source is reported as unknown
+	// rather than guessed — naming a newer cell would be misattribution.
+	test("a request from a cell evicted past the record cap arrives aborted with no source", async () => {
+		const seen: Array<{ aborted: boolean | undefined; source: unknown }> = [];
+		const m = engine({
+			hostHandlers: {
+				"test.late": async (payload, context) => {
+					seen.push({ aborted: context?.signal.aborted, source: payload.cellSourceCode });
+					return {};
+				},
+			},
+		});
+		// Cell 1 schedules an orphan bridge call, then completes normally.
+		await m.execute('setTimeout(() => { rlm.hostRequest("test.late", {}).catch(() => {}); }, 2200); "armed"');
+		// 70 further cells push cell 1 off the 64-record cap before the orphan fires.
+		for (let i = 0; i < 70; i++) await m.execute(`${i}`);
+		await new Promise((r) => setTimeout(r, 2600));
+		expect(seen).toHaveLength(1);
+		expect(seen[0]?.aborted).toBe(true);
+		expect(seen[0]?.source).toBeUndefined();
+	}, 15_000);
+
+	// The reply path must never swallow its own failure: a host_reply whose
+	// payload cannot be encoded (BigInt, circular) used to vanish inside the
+	// dead-pipe guard, parking the awaiting cell forever with no error
+	// anywhere — the "bridged tool call never settles" incident.
+	test("a host reply the protocol cannot encode fails the call instead of parking the cell", async () => {
+		const m = engine({
+			hostHandlers: {
+				"test.bigint": async () => ({ big: 1n }) as unknown as Record<string, unknown>,
+				"test.circular": async () => {
+					const a: Record<string, unknown> = {};
+					a.self = a;
+					return a;
+				},
+			},
+		});
+		for (const requestType of ["test.bigint", "test.circular"]) {
+			const r = await m.execute(`await rlm.hostRequest(${JSON.stringify(requestType)}, {}); "settled"`);
+			expect(r.status).toBe("error");
+			expect(r.error?.message).toMatch(/JSON|serial|circular|BigInt/i);
+		}
+	}, 10_000);
 
 	test("guest awaits a host handler round-trip mid-cell and uses the reply", async () => {
 		let received: Record<string, unknown> | undefined;
