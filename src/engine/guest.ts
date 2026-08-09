@@ -87,6 +87,61 @@ function send(message: GuestToHostMessage): void {
 type Namespace = Record<string, unknown>;
 const namespace: Namespace = Object.create(null);
 
+// ── namespace economy ────────────────────────────────────────────────────────
+// Long sessions accumulate state faster than they shed it. Three structures
+// keep the cost proportional to what is actually being used:
+//   - nameMeta records when each name was last touched (read or written), in
+//     cell counts. Reads count as touches because interior mutation
+//     (`arr.push(1)`) is only visible as a read of `arr` — treating reads as
+//     clean would let a mutated value ride a stale cached blob into a snapshot.
+//   - blobCache holds each name's last serialized form so a snapshot only
+//     re-serialises names touched since it was cached.
+//   - deferredBlobs holds values revived from a snapshot but not yet
+//     deserialized: large cold values load on first read instead of eagerly.
+//     Nothing in here is ever dropped by the engine; only rlm.forget removes.
+
+/** Monotonic cell counter; restored from the snapshot so ages span restarts. */
+let cellSeq = 0;
+const nameMeta = new Map<string, number>();
+const blobCache = new Map<string, { b64: string; serializedAt: number }>();
+const deferredBlobs = new Map<string, { b64: string; touchedAt: number }>();
+
+function touchName(name: string): void {
+	nameMeta.set(name, cellSeq);
+}
+
+/** Deserialize a deferred value into the namespace. Sync so a plain read works. */
+function loadDeferred(name: string, entry: { b64: string; touchedAt: number }): unknown {
+	let value: unknown;
+	try {
+		const buffer = Buffer.from(entry.b64, "base64");
+		value = deserialize(buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength));
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error);
+		throw new Error(`variable "${name}" could not be reloaded from the snapshot: ${reason}`);
+	}
+	deferredBlobs.delete(name);
+	namespace[name] = value;
+	touchName(name);
+	emit("stderr", `[loaded "${name}" from the namespace snapshot]\n`);
+	return value;
+}
+
+/** Remove names entirely: namespace, caches, deferred storage, future snapshots. */
+function forgetNames(names: string[]): string[] {
+	const removed: string[] = [];
+	for (const name of names) {
+		if (typeof name !== "string") continue;
+		const existed = name in namespace || deferredBlobs.has(name);
+		delete namespace[name];
+		deferredBlobs.delete(name);
+		blobCache.delete(name);
+		nameMeta.delete(name);
+		if (existed) removed.push(name);
+	}
+	return removed;
+}
+
 interface CellContext {
 	cellId: string;
 	/** Set when this cell is aborted; its later writes are discarded. */
@@ -124,13 +179,23 @@ function makeScopeProxy(ctx: CellContext): Namespace {
 		},
 		get(target, key) {
 			if (typeof key !== "string") return undefined;
-			if (key in target) return target[key];
+			if (key in target) {
+				touchName(key);
+				return target[key];
+			}
+			const deferred = deferredBlobs.get(key);
+			if (deferred) return loadDeferred(key, deferred);
 			return (globalThis as Record<string, unknown>)[key];
 		},
 		set(target, key, value) {
 			// Writes from an aborted cell's orphaned continuation are dropped;
 			// writes from cells that are merely older are not.
-			if (typeof key === "string" && !ctx.aborted) target[key] = value;
+			if (typeof key === "string" && !ctx.aborted) {
+				// Overwriting a deferred name supersedes its stored blob entirely.
+				deferredBlobs.delete(key);
+				target[key] = value;
+				touchName(key);
+			}
 			return true;
 		},
 	});
@@ -267,6 +332,20 @@ for (const name of TOOL_NAMES) {
 
 const RLM_HANDLE = {
 	hostRequest,
+	/**
+	 * The only true deletion in the namespace economy: the engine defers and
+	 * caches but never destroys, so removal is an explicit agent decision.
+	 *
+	 * Refused for an aborted cell's orphaned continuation for the same reason
+	 * the namespace proxy refuses its writes — forget bypasses the proxy, and
+	 * state destroyed by a cell the agent believes it stopped is worse than
+	 * either finishing or failing cleanly.
+	 */
+	forget(...names: string[]): string[] {
+		const owner = cellStorage.getStore() ?? activeCell;
+		if (owner?.aborted) return [];
+		return forgetNames(names);
+	},
 	async run(prompt: string, kwargs: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
 		return hostRequest("rlm.run", { prompt, kwargs });
 	},
@@ -303,6 +382,7 @@ const AsyncFunction = (async () => {}).constructor as new (
 const liveCells = new Map<string, CellContext>();
 
 async function runCell(cellId: string, code: string): Promise<void> {
+	cellSeq += 1;
 	const ctx = makeCellContext(cellId);
 	activeCell = ctx;
 	liveCells.set(cellId, ctx);
@@ -351,42 +431,105 @@ function abortCell(cellId: string): void {
 
 // ── snapshot / restore / names ───────────────────────────────────────────────
 
-function snapshotNamespace(): { vars: Record<string, string>; failed: { name: string; reason: string }[] } {
+function snapshotNamespace(): {
+	vars: Record<string, string>;
+	written: string[];
+	meta: Record<string, { touchedAt: number }>;
+	cellSeq: number;
+	failed: { name: string; reason: string }[];
+} {
 	const vars: Record<string, string> = {};
+	const written: string[] = [];
+	const meta: Record<string, { touchedAt: number }> = {};
 	const failed: { name: string; reason: string }[] = [];
 	for (const [name, value] of Object.entries(namespace)) {
 		if (INTERNAL_BINDINGS.get(name) === value) continue;
-		try {
-			vars[name] = Buffer.from(serialize(value)).toString("base64");
-		} catch (error) {
-			failed.push({ name, reason: error instanceof Error ? error.message : String(error) });
+		const touchedAt = nameMeta.get(name) ?? cellSeq;
+		const cached = blobCache.get(name);
+		if (cached && cached.serializedAt >= touchedAt) {
+			// Untouched since it was last serialized — reuse the cached blob so
+			// snapshot cost tracks the live set, not the session's whole history.
+			vars[name] = cached.b64;
+		} else {
+			try {
+				const b64 = Buffer.from(serialize(value)).toString("base64");
+				vars[name] = b64;
+				written.push(name);
+				blobCache.set(name, { b64, serializedAt: cellSeq });
+			} catch (error) {
+				failed.push({ name, reason: error instanceof Error ? error.message : String(error) });
+				continue;
+			}
 		}
+		meta[name] = { touchedAt };
 	}
-	return { vars, failed };
+	// Deferred values were never deserialized; their blobs pass through intact
+	// with their original ages, so an unread value survives any number of
+	// snapshot/restore cycles.
+	for (const [name, entry] of deferredBlobs) {
+		vars[name] = entry.b64;
+		meta[name] = { touchedAt: entry.touchedAt };
+	}
+	return { vars, written, meta, cellSeq, failed };
 }
 
-function restoreNamespace(vars: Record<string, string>): {
+function restoreNamespace(
+	vars: Record<string, string>,
+	meta: Record<string, { touchedAt: number }> = {},
+	snapshotSeq = 0,
+	defer?: { minBytes: number; minAgeCells: number },
+): {
 	restored: string[];
+	deferred: string[];
 	failed: { name: string; reason: string }[];
 } {
 	const restored: string[] = [];
+	const deferred: string[] = [];
 	const failed: { name: string; reason: string }[] = [];
+	// Ages continue from where the snapshotted session stopped counting.
+	cellSeq = Math.max(cellSeq, snapshotSeq);
 	for (const [name, encoded] of Object.entries(vars)) {
+		const touchedAt = meta[name]?.touchedAt ?? snapshotSeq;
+		// A name that already exists stays on the eager path regardless of size:
+		// restore has always meant "the snapshot value overwrites", and a deferred
+		// blob behind a live name would be shadowed on reads yet still written
+		// over the live value by the next snapshot's deferred pass — stale data
+		// silently persisted. Deferral is only safe for names nothing holds.
+		if (
+			defer &&
+			!(name in namespace) &&
+			encoded.length >= defer.minBytes &&
+			snapshotSeq - touchedAt >= defer.minAgeCells
+		) {
+			// Large and cold: keep the blob, skip the deserialize. The proxy's get
+			// trap loads it the first time the agent reads the name.
+			deferredBlobs.set(name, { b64: encoded, touchedAt });
+			nameMeta.set(name, touchedAt);
+			deferred.push(name);
+			continue;
+		}
 		try {
 			const buffer = Buffer.from(encoded, "base64");
 			namespace[name] = deserialize(buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength));
 			restored.push(name);
+			nameMeta.set(name, touchedAt);
+			// The blob is valid until the name is touched again; reviving must not
+			// force the next snapshot to re-serialise the entire namespace.
+			blobCache.set(name, { b64: encoded, serializedAt: touchedAt });
 		} catch (error) {
 			failed.push({ name, reason: error instanceof Error ? error.message : String(error) });
 		}
 	}
 	// Bootstrap runs after restore: live handles overwrite anything revived.
 	installBootstrapBindings();
-	return { restored, failed };
+	return { restored, deferred, failed };
 }
 
 function listNames(): string[] {
-	return Object.keys(namespace).filter((name) => INTERNAL_BINDINGS.get(name) !== namespace[name]);
+	const names = Object.keys(namespace).filter((name) => INTERNAL_BINDINGS.get(name) !== namespace[name]);
+	// Deferred names are part of the namespace the agent can read; hiding them
+	// here would misreport what a cell can reach.
+	return [...names, ...deferredBlobs.keys()];
 }
 
 // ── resilience ───────────────────────────────────────────────────────────────
@@ -428,13 +571,18 @@ readline.on("line", (line) => {
 			break;
 		}
 		case "snapshot": {
-			const { vars, failed } = snapshotNamespace();
-			send({ type: "snapshot_result", id: message.id, vars, failed });
+			const { vars, written, meta, cellSeq: seq, failed } = snapshotNamespace();
+			send({ type: "snapshot_result", id: message.id, vars, written, meta, cellSeq: seq, failed });
 			break;
 		}
 		case "restore": {
-			const { restored, failed } = restoreNamespace(message.vars);
-			send({ type: "restore_result", id: message.id, restored, failed });
+			const { restored, deferred, failed } = restoreNamespace(
+				message.vars,
+				message.meta,
+				message.cellSeq,
+				message.defer,
+			);
+			send({ type: "restore_result", id: message.id, restored, deferred, failed });
 			break;
 		}
 		case "list_names":

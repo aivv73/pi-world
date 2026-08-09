@@ -32,7 +32,10 @@ repeating itself.
 **A namespace that persists.** Variables, functions, classes, and imports stay
 available across calls, across turns, and — on a best-effort basis — across
 session resumes. Whatever cannot be serialised is named in the restore report
-rather than silently dropped.
+rather than silently dropped. Long sessions stay cheap: snapshots re-serialise
+only what changed, large long-untouched values revive lazily (they load the
+first time they are read), and `rlm.forget("name")` is the one true delete —
+the engine never discards agent state on its own.
 
 **Shell as values, not text.** `await Bun.$`git log --oneline`.quiet()` returns an
 object with an exit code and captured output, ready to be assigned and filtered.

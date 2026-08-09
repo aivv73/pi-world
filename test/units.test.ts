@@ -252,6 +252,12 @@ describe("system prompt", () => {
 		expect(prompt).toContain("isolated cache");
 	});
 
+	test("namespace hygiene doctrine: forget for cleanup, deferred values load on read", () => {
+		const prompt = buildRlmTsPrompt({ cwd: "/tmp" });
+		expect(prompt).toContain("rlm.forget(");
+		expect(prompt).toContain("load automatically");
+	});
+
 	test("subagent guidance appears only when recursion is allowed", () => {
 		const withRecursion = buildRlmTsPrompt({ cwd: "/tmp", allowRecursion: true });
 		expect(withRecursion).toContain("rlm.run");

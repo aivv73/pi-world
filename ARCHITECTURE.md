@@ -120,6 +120,25 @@ only itself. Functions, live handles, and open resources do not survive; the
 restore report names them. Engine-owned bindings are re-installed after a
 restore, so a stale saved value cannot shadow a live handle.
 
+### The engine defers and caches, but never deletes
+
+A long session accumulates state faster than it sheds it, and re-serialising
+everything after every cell makes the session pay forever for what it did once.
+Three rules keep the cost proportional to what is actually in use:
+
+- A snapshot re-serialises only names touched since the last one; the rest are
+  written from cached blobs. Reads count as touches, because interior mutation
+  (`arr.push(1)`) is only visible as a read.
+- On restore, values that are both large and long-untouched are not
+  deserialized eagerly. Their blobs stay in the guest and load on first read —
+  the proxy's get trap makes that a plain, if briefly slower, property access,
+  announced in the cell's stderr. An unread value survives any number of
+  snapshot/restore cycles intact.
+- Removal is the agent's decision alone: `rlm.forget("name")` deletes a value
+  from the namespace and all future snapshots. (Bare `delete x` is a strict-mode
+  SyntaxError in cells, so the handle method is the deletion path.) The engine
+  itself never drops agent state.
+
 ### Subagents return handles, not answers
 
 `rlm.run` resolves at admission. A parent that blocked until its child finished

@@ -75,6 +75,13 @@ export function formatEngineResetNotice(restore: RestoreResult | null): string {
 			"The evaluator restarted. Its namespace was rebuilt from the last snapshot, so it may be behind.",
 			`Revived (${restore.restored.length}): ${summarizeNames(restore.restored, 20)}`,
 		);
+		if (restore.deferred.length > 0) {
+			// Without this line "revived N" reads as "the rest is lost", and the
+			// agent rebuilds state it already has.
+			lines.push(
+				`Not yet loaded (${restore.deferred.length}): ${summarizeNames(restore.deferred, 20)} — large or long-untouched values; they load automatically the first time you read them.`,
+			);
+		}
 		if (restore.failed.length > 0) {
 			lines.push(
 				`Lost (${restore.failed.length}): ${summarizeNames(

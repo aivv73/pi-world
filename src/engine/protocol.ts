@@ -28,7 +28,17 @@ export interface HostToGuest {
 		error?: string;
 	};
 	snapshot: { type: "snapshot"; id: string };
-	restore: { type: "restore"; id: string; vars: Record<string, string> };
+	restore: {
+		type: "restore";
+		id: string;
+		vars: Record<string, string>;
+		/** Per-name age metadata from the snapshot file; absent for v1 files. */
+		meta?: Record<string, { touchedAt: number }>;
+		/** Cell counter the snapshot was taken at; ages are relative to it. */
+		cellSeq?: number;
+		/** Values at least this large AND this cold load lazily instead of eagerly. */
+		defer?: { minBytes: number; minAgeCells: number };
+	};
 	list_names: { type: "list_names"; id: string };
 }
 
@@ -62,12 +72,18 @@ export interface GuestToHost {
 		type: "snapshot_result";
 		id: string;
 		vars: Record<string, string>;
+		/** Names actually re-serialised this time; the rest came from cache. */
+		written: string[];
+		meta: Record<string, { touchedAt: number }>;
+		cellSeq: number;
 		failed: { name: string; reason: string }[];
 	};
 	restore_result: {
 		type: "restore_result";
 		id: string;
 		restored: string[];
+		/** Names held serialized, loaded on first read instead of eagerly. */
+		deferred: string[];
 		failed: { name: string; reason: string }[];
 	};
 	names_result: { type: "names_result"; id: string; names: string[] };

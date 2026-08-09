@@ -35,6 +35,9 @@ const READY_TIMEOUT_MS = 10_000;
 const ABORT_GRACE_MS = 500;
 const PING_TIMEOUT_MS = 5_000;
 const DEFAULT_SNAPSHOT_DEBOUNCE_MS = 1500;
+/** Restored values this large and untouched this long load lazily on first read. */
+const DEFAULT_DEFER_MIN_BYTES = 128 * 1024;
+const DEFAULT_DEFER_MIN_AGE_CELLS = 8;
 const SNAPSHOT_REQUEST_TIMEOUT_MS = 30_000;
 /**
  * How many recent cells stay resolvable for late bridge calls.
@@ -96,6 +99,8 @@ export interface SnapshotResult {
 	path: string;
 	/** Top-level names successfully serialized. */
 	saved: string[];
+	/** Names re-serialised this time; the rest were cached from earlier snapshots. */
+	written: string[];
 	/** Names that could not be serialized, with reasons. */
 	failed: { name: string; reason: string }[];
 }
@@ -103,6 +108,8 @@ export interface SnapshotResult {
 export interface RestoreResult {
 	path: string;
 	restored: string[];
+	/** Names held serialized rather than revived eagerly; they load on first read. */
+	deferred: string[];
 	failed: { name: string; reason: string }[];
 }
 
@@ -115,6 +122,10 @@ export interface EngineOptions {
 		path: string;
 		/** Debounce for the auto-snapshot after each ok cell. Default 1500 ms. */
 		debounceMs?: number;
+		/** A restored value at least this large is a candidate for lazy loading. Default 128 KiB. */
+		deferMinBytes?: number;
+		/** ... and untouched for at least this many cells. Default 8. */
+		deferMinAgeCells?: number;
 	};
 }
 
@@ -677,8 +688,17 @@ export class EngineManager {
 			const reply = await this.request({ type: "snapshot", id: randomUUID() }, SNAPSHOT_REQUEST_TIMEOUT_MS);
 			if (reply.type !== "snapshot_result") return null;
 			mkdirSync(dirname(config.path), { recursive: true });
-			writeFileSync(config.path, JSON.stringify({ version: 1, vars: reply.vars, failed: reply.failed }));
-			return { path: config.path, saved: Object.keys(reply.vars), failed: reply.failed };
+			writeFileSync(
+				config.path,
+				JSON.stringify({
+					version: 2,
+					vars: reply.vars,
+					meta: reply.meta,
+					cellSeq: reply.cellSeq,
+					failed: reply.failed,
+				}),
+			);
+			return { path: config.path, saved: Object.keys(reply.vars), written: reply.written, failed: reply.failed };
 		} catch {
 			return null;
 		}
@@ -692,11 +712,27 @@ export class EngineManager {
 		try {
 			const payload = JSON.parse(readFileSync(config.path, "utf8")) as {
 				vars?: Record<string, string>;
+				meta?: Record<string, { touchedAt: number }>;
+				cellSeq?: number;
 			};
-			const vars = payload.vars ?? {};
-			const reply = await this.request({ type: "restore", id: randomUUID(), vars }, SNAPSHOT_REQUEST_TIMEOUT_MS);
+			// A v1 file has no ages; every value reads as just-touched and revives
+			// eagerly, which is exactly the old behaviour.
+			const reply = await this.request(
+				{
+					type: "restore",
+					id: randomUUID(),
+					vars: payload.vars ?? {},
+					meta: payload.meta ?? {},
+					cellSeq: payload.cellSeq ?? 0,
+					defer: {
+						minBytes: config.deferMinBytes ?? DEFAULT_DEFER_MIN_BYTES,
+						minAgeCells: config.deferMinAgeCells ?? DEFAULT_DEFER_MIN_AGE_CELLS,
+					},
+				},
+				SNAPSHOT_REQUEST_TIMEOUT_MS,
+			);
 			if (reply.type !== "restore_result") return null;
-			return { path: config.path, restored: reply.restored, failed: reply.failed };
+			return { path: config.path, restored: reply.restored, deferred: reply.deferred, failed: reply.failed };
 		} catch {
 			return null;
 		}

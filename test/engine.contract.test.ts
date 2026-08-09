@@ -788,6 +788,180 @@ describe("snapshot/restore", () => {
 	});
 });
 
+// ── 10b. Namespace economy ────────────────────────────────────────────────────
+// A long session accumulates state faster than it sheds it. Three guarantees
+// keep that sustainable without the engine ever destroying agent state on its
+// own: snapshots re-serialise only what changed, large cold values are revived
+// lazily (loaded on first read, losslessly), and only the agent can truly
+// remove a name — via rlm.forget, since strict-mode cells cannot use bare
+// `delete x`.
+
+describe("namespace economy", () => {
+	// Debounced auto-snapshots would interleave with the explicit ones these
+	// tests reason about, so they are pushed out of the way.
+	const QUIET = { debounceMs: 600_000 };
+
+	test("snapshot re-serialises only names touched since the last snapshot", async () => {
+		const m = engine({ snapshot: { path: join(tempDir(), "ns.snapshot"), ...QUIET } });
+		await m.execute("let alpha = 1; let beta = 2;");
+		const s1 = await m.snapshotState();
+		expect(s1?.written.sort()).toEqual(["alpha", "beta"]);
+
+		await m.execute("alpha += 1;");
+		const s2 = await m.snapshotState();
+		expect(s2?.written).toContain("alpha");
+		expect(s2?.written).not.toContain("beta");
+		// The untouched name is still in the snapshot — cached, not dropped.
+		expect(s2?.saved).toContain("beta");
+	});
+
+	test("a large cold value is deferred at restore and reloads transparently on read", async () => {
+		const snapshot = { path: join(tempDir(), "ns.snapshot"), deferMinBytes: 1000, deferMinAgeCells: 2, ...QUIET };
+		const m1 = engine({ snapshot });
+		await m1.execute('let big = "x".repeat(10_000); let small = 5;');
+		// Age the big value: two cells that do not touch it.
+		await m1.execute("small += 1;");
+		await m1.execute("small += 1;");
+		await m1.snapshotState();
+		await m1.kill();
+
+		const m2 = engine({ snapshot });
+		await m2.start();
+		const restore = await m2.restoreState();
+		expect(restore?.restored).toContain("small");
+		expect(restore?.restored).not.toContain("big");
+		expect(restore?.deferred).toContain("big");
+
+		// An ordinary read faults the value back in — no recall call, exact value.
+		const r = await m2.execute("big.length");
+		expect(r.status).toBe("ok");
+		expect(r.result).toContain("10000");
+		// The reload is announced in-band so the agent knows the pause happened.
+		expect(r.stderr).toContain("big");
+	});
+
+	test("a large value touched recently is revived eagerly despite its size", async () => {
+		const snapshot = { path: join(tempDir(), "ns.snapshot"), deferMinBytes: 1000, deferMinAgeCells: 2, ...QUIET };
+		const m1 = engine({ snapshot });
+		await m1.execute('let bigRecent = "y".repeat(10_000);');
+		await m1.snapshotState();
+		await m1.kill();
+
+		const m2 = engine({ snapshot });
+		await m2.start();
+		const restore = await m2.restoreState();
+		expect(restore?.restored).toContain("bigRecent");
+		expect(restore?.deferred ?? []).not.toContain("bigRecent");
+	});
+
+	test("a deferred value that is never read survives snapshot cycles losslessly", async () => {
+		const snapshot = { path: join(tempDir(), "ns.snapshot"), deferMinBytes: 1000, deferMinAgeCells: 2, ...QUIET };
+		const m1 = engine({ snapshot });
+		await m1.execute('let payload = "z".repeat(20_000); let n = 0;');
+		await m1.execute("n += 1;");
+		await m1.execute("n += 1;");
+		await m1.snapshotState();
+		await m1.kill();
+
+		// Second generation: payload is deferred, never read, and snapshotted again.
+		const m2 = engine({ snapshot });
+		await m2.start();
+		expect((await m2.restoreState())?.deferred).toContain("payload");
+		await m2.execute("n += 1;");
+		await m2.snapshotState();
+		await m2.kill();
+
+		// Third generation: still deferred, still intact.
+		const m3 = engine({ snapshot });
+		await m3.start();
+		expect((await m3.restoreState())?.deferred).toContain("payload");
+		const r = await m3.execute("payload.length");
+		expect(r.result).toContain("20000");
+	});
+
+	// forget bypasses the namespace proxy, so it needs the same orphan guard the
+	// set trap has: state destroyed by a cell the agent believes it stopped is
+	// worse than either finishing or failing cleanly.
+	test("an aborted cell's orphaned continuation cannot forget names", async () => {
+		const m = engine();
+		await m.execute("let precious = 777;");
+		const ac = new AbortController();
+		// The sleep outlives the abort grace but ends inside the test, so the
+		// finally genuinely runs as an orphaned continuation of an aborted cell.
+		const pending = m.execute(
+			'try { await new Promise((r) => setTimeout(r, 900)); } finally { rlm.forget("precious"); }',
+			{ signal: ac.signal },
+		);
+		await new Promise((r) => setTimeout(r, 200));
+		ac.abort();
+		expect((await pending).status).toBe("aborted");
+		// Wait past the sleep so the orphaned finally has fired before checking.
+		await new Promise((r) => setTimeout(r, 1200));
+		expect((await m.execute("precious")).result).toContain("777");
+	});
+
+	// Deferral must never let a stale blob shadow a live value: a name that
+	// already exists at restore time takes the eager path, where the snapshot
+	// value visibly overwrites — exactly the pre-deferral semantics.
+	test("restoring over a live name never leaves a stale deferred blob behind it", async () => {
+		const snapshot = { path: join(tempDir(), "ns.snapshot"), deferMinBytes: 1000, deferMinAgeCells: 0, ...QUIET };
+		const m1 = engine({ snapshot });
+		await m1.execute('let doc = "a".repeat(10_000);');
+		await m1.snapshotState();
+		await m1.kill();
+
+		const m2 = engine({ snapshot });
+		await m2.start();
+		await m2.execute('let doc = "fresh";');
+		const restore = await m2.restoreState();
+		expect(restore?.restored).toContain("doc");
+		expect(restore?.deferred ?? []).not.toContain("doc");
+		expect((await m2.execute("doc.length")).result).toContain("10000");
+	});
+
+	test("rlm.forget removes a name from the namespace and from future snapshots", async () => {
+		const snapshot = { path: join(tempDir(), "ns.snapshot"), ...QUIET };
+		const m1 = engine({ snapshot });
+		await m1.execute('let junk = "j".repeat(5000); let kept = 1;');
+		const forgotten = await m1.execute('rlm.forget("junk")');
+		expect(forgotten.result).toContain("junk");
+		expect((await m1.execute("typeof junk")).result).toContain("undefined");
+		await m1.snapshotState();
+		await m1.kill();
+
+		const m2 = engine({ snapshot });
+		await m2.start();
+		const restore = await m2.restoreState();
+		expect(restore?.restored).toContain("kept");
+		expect(restore?.restored).not.toContain("junk");
+		expect(restore?.deferred ?? []).not.toContain("junk");
+	});
+
+	test("rlm.forget removes a deferred name without ever loading it", async () => {
+		const snapshot = { path: join(tempDir(), "ns.snapshot"), deferMinBytes: 1000, deferMinAgeCells: 2, ...QUIET };
+		const m1 = engine({ snapshot });
+		await m1.execute('let stale = "s".repeat(10_000); let live = 1;');
+		await m1.execute("live += 1;");
+		await m1.execute("live += 1;");
+		await m1.snapshotState();
+		await m1.kill();
+
+		const m2 = engine({ snapshot });
+		await m2.start();
+		expect((await m2.restoreState())?.deferred).toContain("stale");
+		await m2.execute('rlm.forget("stale")');
+		expect((await m2.execute("typeof stale")).result).toContain("undefined");
+		await m2.snapshotState();
+		await m2.kill();
+
+		const m3 = engine({ snapshot });
+		await m3.start();
+		const restore = await m3.restoreState();
+		expect(restore?.restored ?? []).not.toContain("stale");
+		expect(restore?.deferred ?? []).not.toContain("stale");
+	});
+});
+
 // ── 11. Namespace listing ─────────────────────────────────────────────────────
 // The session reports what it revived, which requires knowing which names
 // belong to the agent rather than to the engine.

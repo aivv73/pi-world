@@ -32,9 +32,10 @@ class FakeEngine implements RevivableEngine {
 	}
 }
 
-const snapshotWith = (restored: string[], failed: string[] = []): RestoreResult => ({
+const snapshotWith = (restored: string[], failed: string[] = [], deferred: string[] = []): RestoreResult => ({
 	path: "/tmp/snap",
 	restored,
+	deferred,
 	failed: failed.map((name) => ({ name, reason: "not serializable" })),
 });
 
@@ -133,6 +134,14 @@ describe("engine reset notice", () => {
 		expect(notice).toContain("Revived (2): tmp, entry");
 		expect(notice).toContain("Lost (2): edit, readJson");
 		expect(notice).toContain("</rlm_engine_reset>");
+	});
+
+	test("deferred names are announced with the fact that they load on read", () => {
+		// Without this line the agent sees "revived 2" and concludes the rest is
+		// lost — the exact misreading that would make it rebuild state it has.
+		const notice = formatEngineResetNotice(snapshotWith(["a", "b"], [], ["bigDiff", "parsedLog"]));
+		expect(notice).toContain("Not yet loaded (2): bigDiff, parsedLog");
+		expect(notice).toContain("load automatically");
 	});
 
 	test("an empty namespace is stated plainly rather than as an empty list", () => {
@@ -293,7 +302,7 @@ describe("name summaries", () => {
 
 	test("the reset notice caps its revived list", () => {
 		const names = Array.from({ length: 100 }, (_, i) => `var${i}`);
-		const notice = formatEngineResetNotice({ path: "/tmp/ns.snapshot", restored: names, failed: [] });
+		const notice = formatEngineResetNotice({ path: "/tmp/ns.snapshot", restored: names, deferred: [], failed: [] });
 		expect(notice).toContain("… and 80 more");
 		expect(notice.split("\n").length).toBeLessThan(10);
 	});

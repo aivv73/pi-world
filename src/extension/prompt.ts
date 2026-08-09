@@ -37,6 +37,8 @@ const EVALUATOR_CONTROL_PROMPT = [
 	"If a cell result begins with an `<rlm_engine_reset>` block, the evaluator restarted and its namespace was rebuilt from a snapshot: re-verify any variable named there before reusing it, and never interpolate one into a shell command until you have confirmed it still holds what you expect.",
 	"",
 	"The final expression of a cell is rendered as its result. Prefer many small cells over one large cell: execute, observe, then continue.",
+	"",
+	"The namespace is working memory you own. `rlm.forget('name', ...)` removes variables you are done with — from the namespace and from future snapshots; the engine itself never deletes anything. After a session resumes, large long-untouched variables may be reported as not yet loaded: they load automatically the first time you read them.",
 ].join("\n");
 
 function buildHostToolsSection(summaries: readonly string[]): string {
