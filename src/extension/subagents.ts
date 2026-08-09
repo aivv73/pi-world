@@ -51,24 +51,27 @@ export interface SubagentHostOptions {
 export const MAX_SUBAGENT_NAME_LENGTH = 64;
 
 /**
- * Each provider's cheap fan-out tier, in preference order. Fan-out economics
- * only work at volume prices: inheriting the parent would run children at
- * flagship rates while a 25x cheaper model sits in the same account (sol at
- * $5/$30 vs luna at $0.20/$1.20 per MTok). An entry applies only when a
- * model matching its pattern is actually listed as available — never assumed
- * from the provider merely being present.
+ * Volume-tier names, in preference order. Fan-out economics only work at
+ * volume prices — inheriting the parent would run children at flagship rates
+ * while a 25x cheaper model sits in the same account (sol at $5/$30 vs luna
+ * at $0.20/$1.20 per MTok) — and the industry names its volume tiers
+ * consistently enough that matching the name beats maintaining a per-provider
+ * table that goes stale with every model launch. Ordered best-for-fan-out
+ * first: the dedicated volume flagships, then the mini/nano/lite ladders.
  */
-const CHEAP_TIER = [
-	{ model: "anthropic/haiku", listed: /^anthropic\/(claude-)?haiku/ },
-	{ model: "openai/gpt-5.6-luna", listed: /^openai\/gpt-5\.6-luna$/ },
-] as const;
+const VOLUME_TIER_PATTERNS = [/haiku/, /luna/, /flash/, /mini/, /nano/, /lite/] as const;
+
+/** Dated snapshots always have an undated alias; the alias is the stable name. */
+const DATED_SNAPSHOT = /-\d{8}$/;
 
 /**
  * What children run when rlm.run names no model. A hardcoded default breaks
  * every session whose auth cannot spawn it, so the choice degrades: explicit
- * override, then the first cheap tier whose model is actually available,
- * then the parent's own model — valid by construction. The bare fallback
- * only applies when nothing is known, where any guess fails equally.
+ * override, then the best volume-tier model actually listed as available
+ * (matched by name against the model id, never the provider; newest first by
+ * natural version order), then the parent's own model — valid by
+ * construction. The bare fallback only applies when nothing is known, where
+ * any guess fails equally.
  */
 export function resolveDefaultSubagentModel(options: {
 	override?: string;
@@ -76,8 +79,12 @@ export function resolveDefaultSubagentModel(options: {
 	current?: string;
 }): string {
 	if (options.override) return options.override;
-	for (const tier of CHEAP_TIER) {
-		if (options.available.some((entry) => tier.listed.test(entry))) return tier.model;
+	const candidates = options.available.filter((entry) => !DATED_SNAPSHOT.test(entry));
+	for (const pattern of VOLUME_TIER_PATTERNS) {
+		const matches = candidates.filter((entry) => pattern.test(entry.slice(entry.indexOf("/") + 1)));
+		if (matches.length > 0) {
+			return matches.sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))[0] as string;
+		}
 	}
 	return options.current ?? "anthropic/haiku";
 }

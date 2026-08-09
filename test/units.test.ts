@@ -276,38 +276,60 @@ describe("system prompt", () => {
 	});
 
 	// A hardcoded child default breaks every session whose auth cannot spawn
-	// it, and the prompt would teach the broken default confidently. The env
-	// override wins; then each provider's cheap fan-out tier (haiku, luna)
-	// when that provider is actually available — inheriting the parent would
-	// mean children at flagship prices while a 25x cheaper volume model sits
-	// in the same account. Inherit is the fallback, valid by construction;
-	// the bare default only applies when nothing is known and any guess
-	// fails equally.
-	test("the subagent default degrades from override to provider-cheap to inherit", () => {
-		const openaiOnly = ["openai/gpt-5.6-sol", "openai/gpt-5.6-luna"];
+	// it, and a per-provider table has to be edited every time a provider
+	// ships a new volume model. Volume tiers are named consistently across
+	// the industry — haiku, luna, flash, mini, nano, lite — so resolution
+	// pattern-matches those names against what is actually listed, in tier
+	// order, and returns the exact listed id rather than a fuzzy alias.
+	// Inherit is the fallback, valid by construction; the bare default only
+	// applies when nothing is known and any guess fails equally.
+	test("the subagent default pattern-matches every provider's volume tier", () => {
 		expect(
 			resolveDefaultSubagentModel({
 				override: "openai/gpt-5-mini",
-				available: openaiOnly,
+				available: ["openai/gpt-5.6-sol"],
 				current: "openai/gpt-5.6-sol",
 			}),
 		).toBe("openai/gpt-5-mini");
-		// Anthropic present: haiku, regardless of what else is available.
+		// Tier order: haiku beats luna even when both are listed, and the exact
+		// listed id comes back — not a fuzzy "anthropic/haiku".
 		expect(
 			resolveDefaultSubagentModel({
-				available: ["anthropic/claude-haiku-4-5", ...openaiOnly],
+				available: ["openai/gpt-5.6-luna", "anthropic/claude-haiku-4-5", "openai/gpt-5.6-sol"],
 				current: "openai/gpt-5.6-sol",
 			}),
-		).toBe("anthropic/haiku");
-		// OpenAI only: luna, not the parent's sol.
-		expect(resolveDefaultSubagentModel({ available: openaiOnly, current: "openai/gpt-5.6-sol" })).toBe(
-			"openai/gpt-5.6-luna",
+		).toBe("anthropic/claude-haiku-4-5");
+		// Dated snapshots always have an undated alias; the alias wins.
+		expect(
+			resolveDefaultSubagentModel({
+				available: ["anthropic/claude-haiku-4-5-20251001", "anthropic/claude-haiku-4-5"],
+			}),
+		).toBe("anthropic/claude-haiku-4-5");
+		// OpenAI only: luna, not the parent's flagship.
+		expect(
+			resolveDefaultSubagentModel({
+				available: ["openai/gpt-5.6-sol", "openai/gpt-5.6-luna", "openai/gpt-5.4-mini"],
+				current: "openai/gpt-5.6-sol",
+			}),
+		).toBe("openai/gpt-5.6-luna");
+		// No luna: the newest mini by natural version order, not string order.
+		expect(
+			resolveDefaultSubagentModel({
+				available: ["openai/gpt-4o-mini", "openai/gpt-5.4-mini", "openai/gpt-5.6-sol"],
+			}),
+		).toBe("openai/gpt-5.4-mini");
+		// Google's volume tier is found without a google table entry.
+		expect(
+			resolveDefaultSubagentModel({
+				available: ["google/gemini-3-pro", "google/gemini-3-flash"],
+				current: "google/gemini-3-pro",
+			}),
+		).toBe("google/gemini-3-flash");
+		// The pattern must match the model id, never the provider name.
+		expect(resolveDefaultSubagentModel({ available: ["minimax/frontier-xl"], current: "minimax/frontier-xl" })).toBe(
+			"minimax/frontier-xl",
 		);
-		// A provider with no known cheap tier: inherit the parent.
-		expect(resolveDefaultSubagentModel({ available: ["google/gemini-3-pro"], current: "google/gemini-3-pro" })).toBe(
-			"google/gemini-3-pro",
-		);
-		// The cheap tier must actually be listed, not assumed from the provider.
+		// Nothing cheap listed: inherit the parent.
 		expect(resolveDefaultSubagentModel({ available: ["openai/gpt-5.6-sol"], current: "openai/gpt-5.6-sol" })).toBe(
 			"openai/gpt-5.6-sol",
 		);
