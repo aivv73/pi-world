@@ -10,7 +10,13 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # macOS, not ubuntu: the suite's host process is Bun (bun test), and Bun on
+    # Linux cannot spawn a child with an extra stdio pipe on fd 3 — the guest's
+    # protocol channel — failing with "Failed to connect ENOENT" in
+    # #createStdioObject. Production is unaffected (pi runs the host under Node,
+    # which handles extra fds); the broken combination is exactly the test
+    # runner. Move back to ubuntu when Bun fixes extra-fd spawn on Linux.
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
