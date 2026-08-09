@@ -291,12 +291,27 @@ describe("system prompt", () => {
 				current: "openai/gpt-5.6-sol",
 			}),
 		).toBe("openai/gpt-5-mini");
-		// Tier order: haiku beats luna even when both are listed, and the exact
-		// listed id comes back — not a fuzzy "anthropic/haiku".
+		// The parent's provider anchors the choice: an openai parent gets luna
+		// even with haiku listed, an anthropic parent gets haiku — children bill
+		// and authenticate where the parent already lives.
 		expect(
 			resolveDefaultSubagentModel({
 				available: ["openai/gpt-5.6-luna", "anthropic/claude-haiku-4-5", "openai/gpt-5.6-sol"],
 				current: "openai/gpt-5.6-sol",
+			}),
+		).toBe("openai/gpt-5.6-luna");
+		expect(
+			resolveDefaultSubagentModel({
+				available: ["openai/gpt-5.6-luna", "anthropic/claude-haiku-4-5", "anthropic/claude-fable-5"],
+				current: "anthropic/claude-fable-5",
+			}),
+		).toBe("anthropic/claude-haiku-4-5");
+		// A parent whose provider has no volume tier still gets a cheap child
+		// from another available provider before inheriting flagship prices.
+		expect(
+			resolveDefaultSubagentModel({
+				available: ["google/gemini-3-pro", "anthropic/claude-haiku-4-5"],
+				current: "google/gemini-3-pro",
 			}),
 		).toBe("anthropic/claude-haiku-4-5");
 		// Dated snapshots always have an undated alias; the alias wins.
@@ -328,6 +343,10 @@ describe("system prompt", () => {
 		// The pattern must match the model id, never the provider name.
 		expect(resolveDefaultSubagentModel({ available: ["minimax/frontier-xl"], current: "minimax/frontier-xl" })).toBe(
 			"minimax/frontier-xl",
+		);
+		// Tokens are whole segments: gemini contains "mini" and is a flagship.
+		expect(resolveDefaultSubagentModel({ available: ["google/gemini-3-pro"], current: "google/gemini-3-pro" })).toBe(
+			"google/gemini-3-pro",
 		);
 		// Nothing cheap listed: inherit the parent.
 		expect(resolveDefaultSubagentModel({ available: ["openai/gpt-5.6-sol"], current: "openai/gpt-5.6-sol" })).toBe(

@@ -58,8 +58,12 @@ export const MAX_SUBAGENT_NAME_LENGTH = 64;
  * consistently enough that matching the name beats maintaining a per-provider
  * table that goes stale with every model launch. Ordered best-for-fan-out
  * first: the dedicated volume flagships, then the mini/nano/lite ladders.
+ * Tokens match whole hyphen/dot-delimited segments: "mini" must find
+ * gpt-5.4-mini and never gemini-3-pro, whose name merely contains the letters.
  */
-const VOLUME_TIER_PATTERNS = [/haiku/, /luna/, /flash/, /mini/, /nano/, /lite/] as const;
+const VOLUME_TIER_PATTERNS = ["haiku", "luna", "flash", "mini", "nano", "lite"].map(
+	(token) => new RegExp(`(^|[-.])${token}($|[-.])`),
+);
 
 /** Dated snapshots always have an undated alias; the alias is the stable name. */
 const DATED_SNAPSHOT = /-\d{8}$/;
@@ -67,11 +71,12 @@ const DATED_SNAPSHOT = /-\d{8}$/;
 /**
  * What children run when rlm.run names no model. A hardcoded default breaks
  * every session whose auth cannot spawn it, so the choice degrades: explicit
- * override, then the best volume-tier model actually listed as available
- * (matched by name against the model id, never the provider; newest first by
- * natural version order), then the parent's own model — valid by
- * construction. The bare fallback only applies when nothing is known, where
- * any guess fails equally.
+ * override, then the parent provider's own volume tier — children bill and
+ * authenticate where the parent already lives — then any provider's volume
+ * tier, then the parent's own model, valid by construction. Matching runs
+ * against the model id, never the provider; newest wins by natural version
+ * order. The bare fallback only applies when nothing is known, where any
+ * guess fails equally.
  */
 export function resolveDefaultSubagentModel(options: {
 	override?: string;
@@ -80,10 +85,17 @@ export function resolveDefaultSubagentModel(options: {
 }): string {
 	if (options.override) return options.override;
 	const candidates = options.available.filter((entry) => !DATED_SNAPSHOT.test(entry));
-	for (const pattern of VOLUME_TIER_PATTERNS) {
-		const matches = candidates.filter((entry) => pattern.test(entry.slice(entry.indexOf("/") + 1)));
-		if (matches.length > 0) {
-			return matches.sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))[0] as string;
+	const slash = options.current?.indexOf("/") ?? -1;
+	const parentProvider = slash > 0 ? options.current?.slice(0, slash) : undefined;
+	const pools = parentProvider
+		? [candidates.filter((entry) => entry.startsWith(`${parentProvider}/`)), candidates]
+		: [candidates];
+	for (const pool of pools) {
+		for (const pattern of VOLUME_TIER_PATTERNS) {
+			const matches = pool.filter((entry) => pattern.test(entry.slice(entry.indexOf("/") + 1)));
+			if (matches.length > 0) {
+				return matches.sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))[0] as string;
+			}
 		}
 	}
 	return options.current ?? "anthropic/haiku";
