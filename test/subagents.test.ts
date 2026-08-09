@@ -121,6 +121,53 @@ describe("subagent host", () => {
 		expect(host.entries()).toHaveLength(0);
 	});
 
+	// The frame record is the durable half of the registry: rendering, lineage
+	// across processes, and post-mortem inspection all read these files, so a
+	// spawn must leave one behind and an exit must finalize it in place.
+	test("spawn writes a frame record; exit finalizes it; the child learns its own id", async () => {
+		const d = tempDir();
+		const host = createSubagentHost({
+			cwd: d,
+			subagentDir: d,
+			defaultModel: "anthropic/haiku",
+			depth: 0,
+			maxDepth: 2,
+			selfChildId: "sub-parent-id",
+			spawnCommand: () => ({ command: "sh", args: ["-c", 'echo "my-id:$PI_RLM_CHILD_ID"'] }),
+		});
+		const m = new EngineManager({ hostHandlers: host.handlers });
+		managers.push(m);
+		const r = await m.execute('await rlm.run("audit the pdfs");', { cellId: "cell-spawn-site" });
+		expect(r.status).toBe("ok");
+		const entry = host.entries()[0];
+		const metaPath = join(d, `${entry.rlm_child_id}.json`);
+		const meta = JSON.parse(readFileSync(metaPath, "utf8"));
+		expect(meta.rlm_child_id).toBe(entry.rlm_child_id);
+		expect(meta.prompt).toBe("audit the pdfs");
+		expect(meta.status).toBe("running");
+		expect(meta.spawn_cell_id).toBe("cell-spawn-site");
+		expect(meta.parent_child_id).toBe("sub-parent-id");
+		expect(typeof meta.spawned_at).toBe("string");
+
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		const final = JSON.parse(readFileSync(metaPath, "utf8"));
+		expect(final.status).toBe("completed");
+		expect(typeof final.finished_at).toBe("string");
+		// The child can label its own records: lineage links grandchildren to it.
+		expect(readFileSync(entry.output_file, "utf8")).toContain(`my-id:${entry.rlm_child_id}`);
+	});
+
+	test("delete_subagent removes the frame record along with the registry entry", async () => {
+		const d = tempDir();
+		const host = fakeHost(d, "sleep 60");
+		const m = new EngineManager({ hostHandlers: host.handlers });
+		managers.push(m);
+		await m.execute('const h = await rlm.run("long task"); await rlm.deleteSubagent(h.rlm_child_id);');
+		expect(host.entries()).toHaveLength(0);
+		const { readdirSync } = await import("node:fs");
+		expect(readdirSync(d).filter((f) => f.endsWith(".json"))).toHaveLength(0);
+	});
+
 	test("names: explicit name respected, oversized rejected, default is a slug", async () => {
 		const d = tempDir();
 		const host = fakeHost(d);

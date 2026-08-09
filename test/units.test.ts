@@ -493,6 +493,47 @@ describe("render-core: layout", () => {
 		expect(stripAnsi(renderExecuteCell(running, 80, deps).join("\n"))).toContain("waiting for output");
 	});
 
+	// Subagents render as a call stack growing out of the cell that spawned
+	// them. A live stack asserts itself: while anything runs, the frames are
+	// visible even on a collapsed cell — supervision should not require a
+	// keypress. Once every frame settles, the stack folds into the header chip.
+	test("a running stack is visible even collapsed; a settled stack folds to the chip", () => {
+		const deps = testDeps();
+		const frame = (status: "running" | "completed") => [
+			{
+				record: {
+					rlm_child_id: "sub-a",
+					name: "pdf-audit",
+					prompt: "audit the pdfs",
+					model: "anthropic/haiku",
+					status,
+					spawned_at: new Date(Date.now() - 5_000).toISOString(),
+					spawn_cell_id: "cell-1",
+				},
+				children: [],
+			},
+		];
+		const live = renderExecuteCell(makeState({ frames: frame("running") }), 200, deps).map(stripAnsi);
+		expect(live[0]).toContain("1 subagent");
+		expect(live[0]).toContain("1 running");
+		expect(live.join("\n")).toContain("pdf-audit");
+		expect(live.join("\n")).toContain('rlm.run("audit the pdfs")');
+
+		const settled = renderExecuteCell(makeState({ frames: frame("completed") }), 200, deps).map(stripAnsi);
+		expect(settled).toHaveLength(1);
+		expect(settled[0]).toContain("1 subagent");
+
+		const expanded = renderExecuteCell(makeState({ frames: frame("completed"), expanded: true }), 200, deps).map(
+			stripAnsi,
+		);
+		expect(expanded.join("\n")).toContain("pdf-audit");
+	});
+
+	test("a cell without frames renders no subagent chip", () => {
+		const deps = testDeps();
+		expect(stripAnsi(renderExecuteCell(makeState(), 200, deps)[0])).not.toContain("subagent");
+	});
+
 	test("background is re-armed after inner SGR resets so it spans the row", () => {
 		const deps = testDeps();
 		const painted = paintBackground("\x1b[31mred\x1b[0mplain", 20, "done", deps);

@@ -25,9 +25,12 @@ export interface ExecuteRenderState {
 	expanded: boolean;
 	executionStarted: boolean;
 	hasResult: boolean;
+	/** Subagents this cell spawned, treed by lineage; the cell is frame #0. */
+	frames?: FrameNode[];
 }
 
 import { previewCell } from "./preview-core.js";
+import { type FrameNode, formatFrameSummary, renderFrames, summarizeFrames } from "./stack-core.js";
 
 export type StatusKind = "error" | "aborted" | "running" | "queued" | "done";
 export type BgKind = "toolPendingBg" | "toolSuccessBg" | "toolErrorBg";
@@ -165,6 +168,13 @@ function topLine(state: ExecuteRenderState, width: number, deps: RenderDeps): st
 	const duration = formatDuration(state.details?.durationMs);
 	if (duration) suffixParts.push(deps.fg("muted", duration));
 
+	// The collapsed stack: the header names what the cell delegated even when
+	// the frames themselves are folded away.
+	if (state.frames && state.frames.length > 0) {
+		const summary = summarizeFrames(state.frames);
+		suffixParts.push(deps.fg(summary.failed > 0 ? "error" : "muted", formatFrameSummary(summary)));
+	}
+
 	const errorName = !state.isPartial ? state.details?.errorName : undefined;
 	if (errorName) {
 		// "RangeError: demo explosion" beats a bare "RangeError" when it fits;
@@ -279,6 +289,20 @@ export function renderExecuteCell(state: ExecuteRenderState, width: number, deps
 	if (state.expanded) {
 		const hasCode = renderCode(state, lines, safeWidth, deps);
 		renderOutput(state, lines, safeWidth, hasCode, deps);
+	}
+	// The stack grows out of the cell that spawned it: one line per frame,
+	// beneath the output, indented by depth. A live stack asserts itself —
+	// while anything runs the frames show even on a collapsed cell, because
+	// supervision should not require a keypress. Settled stacks fold into the
+	// header chip.
+	if (state.frames && state.frames.length > 0 && (state.expanded || summarizeFrames(state.frames).running > 0)) {
+		lines.push("");
+		// Frames are laid out one column narrower than the pane: the leading
+		// space added here would otherwise push a full-width line over the edge
+		// and the outer truncate would eat its ellipsis.
+		for (const line of renderFrames(state.frames, safeWidth - 1, deps)) {
+			lines.push(deps.truncateToWidth(` ${line}`, safeWidth, ""));
+		}
 	}
 	const kind = statusKind(state);
 	return lines.map((line) => paintBackground(line, safeWidth, kind, deps));

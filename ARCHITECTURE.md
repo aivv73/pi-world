@@ -120,6 +120,26 @@ only itself. Functions, live handles, and open resources do not survive; the
 restore report names them. Engine-owned bindings are re-installed after a
 restore, so a stale saved value cannot shadow a live handle.
 
+### A subagent is a stack frame
+
+Three unifications, each deleting a concept instead of adding one:
+
+- **One identity.** pi's toolCallId is passed down as the engine's cell id and
+  recorded as each child's `spawn_cell_id`, so a cell component finds its own
+  children by filename match — no mapping tables.
+- **One source of truth.** The frame record (`<child_id>.json` beside the
+  output file) is the durable half of the registry; the in-memory map holds
+  only process handles. Every process writes its children under its own
+  `.pi-rlm/<session>/subagents/` in the shared cwd, so the full tree across
+  all recursion depths is one directory walk — no IPC, and it works after
+  every process has exited. A running record whose pid is gone reads as
+  `lost` at display time; the file is never rewritten.
+- **One renderer.** The spawning cell is frame #0: frames render beneath its
+  output, visible even collapsed while anything runs (supervision should not
+  require a keypress), folding into a header count chip once settled. A
+  settled cell keeps itself live by asking pi for a repaint once a second
+  while frames run; the chain stops on its own when they finish.
+
 ### The engine defers and caches, but never deletes
 
 A long session accumulates state faster than it sheds it, and re-serialising

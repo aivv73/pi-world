@@ -29,6 +29,13 @@ repeating itself.
 
 ## What the agent gets
 
+**Subagents as a call stack.** A cell that calls `rlm.run` renders its
+children as stack frames beneath it — glyph, name, status, age, spawn site —
+nested by depth. While anything runs the stack stays visible on the collapsed
+cell; once every frame settles it folds into a header chip (`3 subagents ·
+1 failed`). Frame records live on disk beside each child's output, so stacks
+survive session resume and read truthfully post-mortem.
+
 **A namespace that persists.** Variables, functions, classes, and imports stay
 available across calls, across turns, and — on a best-effort basis — across
 session resumes. Whatever cannot be serialised is named in the restore report

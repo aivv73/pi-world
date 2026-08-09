@@ -468,6 +468,26 @@ describe("truncation", () => {
 // handler failures surface as ordinary errors inside the cell.
 
 describe("host bridge", () => {
+	// The spawn site is the identity that ties host-side records back to the
+	// transcript: the caller supplies the cell id (pi's toolCallId), and every
+	// handler learns which cell called it and what that cell's source was — so
+	// a record written by a handler can point at the exact cell that renders it.
+	test("a caller-supplied cell id reaches host handlers alongside the cell's source", async () => {
+		const seen: Array<{ cellId?: string; source?: unknown }> = [];
+		const m = engine({
+			hostHandlers: {
+				"test.probe": async (payload, context) => {
+					seen.push({ cellId: context?.cellId, source: payload.cellSourceCode });
+					return {};
+				},
+			},
+		});
+		const r = await m.execute('await rlm.hostRequest("test.probe", {}); "done"', { cellId: "cell-under-test" });
+		expect(r.status).toBe("ok");
+		expect(seen[0]?.cellId).toBe("cell-under-test");
+		expect(String(seen[0]?.source)).toContain("test.probe");
+	});
+
 	test("guest awaits a host handler round-trip mid-cell and uses the reply", async () => {
 		let received: Record<string, unknown> | undefined;
 		const m = engine({

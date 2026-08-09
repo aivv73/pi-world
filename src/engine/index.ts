@@ -73,6 +73,12 @@ export interface ExecuteOptions {
 	onStream?: (chunk: string, name: "stdout" | "stderr") => void;
 	/** Cap stdout / stderr / result at this many characters. Default 65536. */
 	maxOutputChars?: number;
+	/**
+	 * Caller-supplied cell identity (pi passes its toolCallId). One id then
+	 * flows from the transcript through the bridge into anything a handler
+	 * records, so host-side records can name the exact cell that renders them.
+	 */
+	cellId?: string;
 }
 
 /** Passed alongside a host request's payload. */
@@ -86,6 +92,8 @@ export interface HostRequestContext {
 	 * has to decide what an absent signal means.
 	 */
 	signal: AbortSignal;
+	/** The cell that issued this request — the caller's id when one was given. */
+	cellId: string;
 }
 
 /** Handles one typed request from guest code. Reply is sent back verbatim. */
@@ -500,7 +508,7 @@ export class EngineManager {
 			// recent cell instead would be the same misattribution this exists to
 			// prevent, only harder to notice because it looks like an answer.
 			const signal = record ? record.hostAbort.signal : AbortSignal.abort();
-			const reply = await handler({ ...payload, cellSourceCode: record?.code }, { signal });
+			const reply = await handler({ ...payload, cellSourceCode: record?.code }, { signal, cellId });
 			this.sendToGuest({ type: "host_reply", id, status: "ok", payload: reply });
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -590,7 +598,7 @@ export class EngineManager {
 	}
 
 	private executeInner(code: string, opts: ExecuteOptions): Promise<ExecuteResult> {
-		const cellId = randomUUID();
+		const cellId = opts.cellId ?? randomUUID();
 		const started = Date.now();
 
 		return new Promise<ExecuteResult>((resolve, reject) => {

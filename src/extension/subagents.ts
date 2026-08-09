@@ -11,9 +11,10 @@
 
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { closeSync, mkdirSync, openSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { HostRequestHandlers } from "../engine/index.js";
+import type { FrameRecord } from "./frames.js";
 
 export type SubagentStatus = "running" | "completed" | "error";
 
@@ -37,6 +38,12 @@ export interface SubagentHostOptions {
 	/** Recursion depth of THIS agent; children get depth + 1. */
 	depth: number;
 	maxDepth: number;
+	/**
+	 * The id the parent assigned THIS agent (PI_RLM_CHILD_ID), stamped into
+	 * every frame record it writes so grandchildren link back to it. Absent at
+	 * the root: its frames are linked by spawn cell alone.
+	 */
+	selfChildId?: string;
 	/** Override the spawned command for tests. Receives the fully built args. */
 	spawnCommand?: (entry: SubagentEntry, prompt: string) => { command: string; args: string[] };
 }
@@ -65,6 +72,10 @@ export interface SubagentHost {
 export function createSubagentHost(options: SubagentHostOptions): SubagentHost {
 	const registry = new Map<string, SubagentEntry>();
 	const children = new Map<string, ReturnType<typeof spawn>>();
+	// Deleting a running child races its exit event: SIGTERM fires "exit" after
+	// the delete handler already removed the frame file, and an unguarded exit
+	// write would resurrect it. Discarding routes all later writes to nowhere.
+	const discardFrame = new Map<string, () => void>();
 
 	function toPublicEntry(entry: SubagentEntry): Record<string, unknown> {
 		// One name for one concept: rlm.run replies with `name`, so the registry
@@ -82,7 +93,7 @@ export function createSubagentHost(options: SubagentHostOptions): SubagentHost {
 	}
 
 	const handlers: HostRequestHandlers = {
-		"rlm.run": async (payload) => {
+		"rlm.run": async (payload, context) => {
 			const prompt = payload.prompt;
 			if (typeof prompt !== "string" || prompt.trim().length === 0) {
 				throw new Error("rlm.run prompt must be a non-empty string");
@@ -116,6 +127,36 @@ export function createSubagentHost(options: SubagentHostOptions): SubagentHost {
 				pid: undefined,
 			};
 
+			// The frame record is the durable half of the registry: rendering,
+			// cross-process lineage, and post-mortem inspection all read this file,
+			// so it exists from admission and is finalized in place on exit.
+			const framePath = join(options.subagentDir, `${childId}.json`);
+			const frame: FrameRecord = {
+				rlm_child_id: childId,
+				name,
+				prompt,
+				model,
+				status: "running",
+				spawned_at: new Date().toISOString(),
+				...(context?.cellId ? { spawn_cell_id: context.cellId } : {}),
+				...(options.selfChildId ? { parent_child_id: options.selfChildId } : {}),
+			};
+			let frameDiscarded = false;
+			discardFrame.set(childId, () => {
+				frameDiscarded = true;
+				try {
+					rmSync(framePath, { force: true });
+				} catch {}
+			});
+			const writeFrame = (): void => {
+				if (frameDiscarded) return;
+				try {
+					writeFileSync(framePath, JSON.stringify(frame));
+				} catch {
+					// A frame that cannot be written costs the stack view, not the spawn.
+				}
+			};
+
 			const spec = options.spawnCommand
 				? options.spawnCommand(entry, prompt)
 				: {
@@ -145,20 +186,36 @@ export function createSubagentHost(options: SubagentHostOptions): SubagentHost {
 				// PI_RLM_FORCE activates the child regardless of flag plumbing: the
 				// child loads this extension via -e and must enter the RLM world
 				// without depending on --rlm surviving pi's argv handling.
-				env: { ...process.env, PI_RLM_DEPTH: String(options.depth + 1), PI_RLM_FORCE: "1" },
+				// PI_RLM_CHILD_ID tells the child its own id, so the frame records it
+				// writes for grandchildren carry the link back to this one.
+				env: {
+					...process.env,
+					PI_RLM_DEPTH: String(options.depth + 1),
+					PI_RLM_FORCE: "1",
+					PI_RLM_CHILD_ID: childId,
+				},
 			});
 			closeSync(outFd);
 			entry.pid = child.pid;
+			frame.pid = child.pid;
+			writeFrame();
 			registry.set(childId, entry);
 			children.set(childId, child);
 
 			child.on("exit", (code) => {
 				entry.exit_code = code;
 				entry.status = code === 0 ? "completed" : "error";
+				frame.status = entry.status;
+				frame.exit_code = code;
+				frame.finished_at = new Date().toISOString();
+				writeFrame();
 				children.delete(childId);
 			});
 			child.on("error", () => {
 				entry.status = "error";
+				frame.status = "error";
+				frame.finished_at = new Date().toISOString();
+				writeFrame();
 				children.delete(childId);
 			});
 
@@ -189,6 +246,10 @@ export function createSubagentHost(options: SubagentHostOptions): SubagentHost {
 				entry.status = "error";
 			}
 			registry.delete(entry.rlm_child_id);
+			// Deletion means gone everywhere the registry speaks: the frame record
+			// goes with the entry, so the stack view cannot resurrect it.
+			discardFrame.get(entry.rlm_child_id)?.();
+			discardFrame.delete(entry.rlm_child_id);
 			return { subagent: toPublicEntry(entry) };
 		},
 	};

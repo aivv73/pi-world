@@ -13,7 +13,7 @@ import { Type } from "typebox";
 import { EngineBusyError, EngineManager } from "../engine/index.js";
 import { createPiToolsHost, type PiToolsHost } from "./pi-tools.js";
 import { buildRlmTsPrompt } from "./prompt.js";
-import { ExecuteCellComponent, type ExecuteDetails, type ExecuteRenderState } from "./render.js";
+import { ExecuteCellComponent, type ExecuteDetails, type ExecuteRenderState, makeFrameSource } from "./render.js";
 import { EngineLifecycle, summarizeNames } from "./session-engine.js";
 import { createSubagentHost, type SubagentHost } from "./subagents.js";
 
@@ -55,6 +55,8 @@ function composeErrorLines(error: { name: string; message: string; stack: string
 const DEFAULT_SUBAGENT_MODEL = process.env.PI_RLM_SUBAGENT_MODEL ?? "anthropic/haiku";
 const DEPTH = Number(process.env.PI_RLM_DEPTH ?? "0");
 const MAX_DEPTH = Number(process.env.PI_RLM_MAX_DEPTH ?? "2");
+/** Set by the parent's spawn: this agent's own id, linking its frames upward. */
+const SELF_CHILD_ID = process.env.PI_RLM_CHILD_ID;
 
 export default function (pi: ExtensionAPI) {
 	pi.registerFlag("rlm", {
@@ -92,6 +94,7 @@ export default function (pi: ExtensionAPI) {
 				defaultModel: DEFAULT_SUBAGENT_MODEL,
 				depth: DEPTH,
 				maxDepth: MAX_DEPTH,
+				selfChildId: SELF_CHILD_ID,
 			});
 			piTools = createPiToolsHost({ cwd });
 			return new EngineManager({
@@ -198,7 +201,13 @@ export default function (pi: ExtensionAPI) {
 		renderShell: "self",
 		renderCall(args, theme, context) {
 			const state = syncRenderState(context.state, { ...context, args });
-			return new ExecuteCellComponent(state, theme);
+			// The tool call id is the cell id is the spawn frame: a cell that can
+			// spawn gets a frame source keyed by its own id. Cells that never
+			// mention rlm.run skip the disk entirely.
+			const framesSource = args?.code?.includes("rlm.run")
+				? makeFrameSource(context.cwd, context.toolCallId)
+				: undefined;
+			return new ExecuteCellComponent(state, theme, framesSource, context.invalidate);
 		},
 		renderResult(result, options, _theme, context) {
 			const state = syncRenderState(context.state, context);
@@ -227,6 +236,9 @@ export default function (pi: ExtensionAPI) {
 				let streamed = "";
 				const r = await m.execute(params.code, {
 					signal,
+					// One identity end to end: the transcript's toolCallId is the
+					// engine's cell id is the spawn_cell_id in frame records.
+					cellId: toolCallId,
 					onStream: (chunk) => {
 						streamed += chunk;
 						onUpdate?.({ content: [{ type: "text", text: streamed }], details: {} });
