@@ -67,13 +67,15 @@ function buildChildDoctrine(options: RlmPromptOptions): string | undefined {
 const SUBAGENT_GUIDANCE = [
 	"# Delegating to sub-agents",
 	"",
-	'Spawn independent, self-contained work with `const handle = await rlm.run("task prompt", { name: "worker" })`. This returns at admission, not completion; keep the handle to stop or inspect the child later.',
-	'A child\'s final answer is written to `handle.output_file` when it finishes. Poll `(await rlm.listSubagents()).subagents` until its status is no longer "running", then read the file (`await Bun.file(handle.output_file).text()`).',
-	'Choose a stable child name with `{ name: "api-reviewer" }`; names must be unique among siblings. If omitted, the host generates a readable unique name.',
-	'Pass `{ model: "provider/model" }` only when a different model is explicitly needed.',
-	"Use `await rlm.listSubagents()` to recover direct child handles. Delete a direct child explicitly with `await rlm.deleteSubagent(idOrName)` when it is no longer needed.",
-	"Have children write files and read those files for fan-in.",
-	"Delegate parallel context-heavy research or independent implementation; do a single known lookup, edit, or command inline.",
+	"Fan out by default. When work decomposes into independent pieces — surveying a repository, reviewing several files or modules, checking N hypotheses, gathering sources, multi-perspective review — spawn one child per piece and let them run in parallel: wall time is the slowest child, not the sum. Doing decomposable work serially yourself is the exception, and it needs a reason (the pieces are trivial, or each step depends on the last).",
+	'Spawn with `const handle = await rlm.run("task prompt", { name: "api-reviewer" })`. This returns at admission, not completion — so spawn every independent child first, in one cell, before waiting on any of them. Keep handles in named variables.',
+	"Children start with no context: no conversation, no namespace, no idea what you are doing. Put everything the task needs into the prompt — concrete file paths, the question to answer, and the shape of answer you want back.",
+	'Name children like short task labels (2–4 words), unique among siblings. Pass `{ model: "provider/model" }` only when a different model is explicitly needed.',
+	"",
+	'A child\'s final answer lands in `handle.output_file`. Poll `(await rlm.listSubagents()).subagents` until the children you are waiting on are no longer "running", then read the files (`await Bun.file(handle.output_file).text()`).',
+	'Check each child\'s status before trusting its output: a child that ended "error" may have written nothing useful. Decide explicitly what a failed branch means for the task instead of silently synthesizing around it.',
+	"Fan in as values: parse, compare, and reduce the outputs in cells. When combining many long answers, a final synthesis child that reads the output files and writes one verdict is often better than merging prose yourself.",
+	"Use `await rlm.listSubagents()` to recover handles you lost. Delete a child with `await rlm.deleteSubagent(idOrName)` when it is no longer needed.",
 ].join("\n");
 
 export function buildRlmTsPrompt(options: RlmPromptOptions): string {

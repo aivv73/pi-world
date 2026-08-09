@@ -258,6 +258,18 @@ describe("system prompt", () => {
 		expect(prompt).toContain("load automatically");
 	});
 
+	// Machinery without appetite goes unused: the doctrine must teach the
+	// posture (fan out decomposable work by default), the blank-slate rule
+	// (children get no context except the prompt), and the fan-in discipline
+	// (check status before trusting output) — not just the spawn mechanics.
+	test("subagent doctrine teaches fan-out posture, blank-slate children, and fan-in discipline", () => {
+		const prompt = buildRlmTsPrompt({ cwd: "/w", allowRecursion: true });
+		expect(prompt).toContain("Fan out by default");
+		expect(prompt).toContain("wall time");
+		expect(prompt).toMatch(/children start with no context/i);
+		expect(prompt).toMatch(/check .*status/i);
+	});
+
 	test("subagent guidance appears only when recursion is allowed", () => {
 		const withRecursion = buildRlmTsPrompt({ cwd: "/tmp", allowRecursion: true });
 		expect(withRecursion).toContain("rlm.run");
