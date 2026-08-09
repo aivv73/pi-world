@@ -12,7 +12,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { EngineBusyError, EngineManager } from "../engine/index.js";
 import { createPiToolsHost, type PiToolsHost } from "./pi-tools.js";
-import { buildRlmTsPrompt } from "./prompt.js";
+import { buildRlmTsPrompt, type RlmPromptModels } from "./prompt.js";
 import { ExecuteCellComponent, type ExecuteDetails, type ExecuteRenderState, makeFrameSource } from "./render.js";
 import { EngineLifecycle, summarizeNames } from "./session-engine.js";
 import { createSubagentHost, type SubagentHost } from "./subagents.js";
@@ -82,6 +82,11 @@ export default function (pi: ExtensionAPI) {
 	>();
 	// Where the engine will be built from, captured by whichever event runs first.
 	let location = { cwd: process.cwd(), sessionFile: undefined as string | undefined };
+	// The model landscape for the prompt, computed at the first agent start and
+	// held for the session: the system prompt is cached, and recomputing a list
+	// that may shift (registry refresh, auth changes) would invalidate that
+	// cache on every turn. A new session starts fresh.
+	let modelsSeed: RlmPromptModels | undefined;
 
 	const lifecycle = new EngineLifecycle<EngineManager>({
 		create() {
@@ -127,6 +132,13 @@ export default function (pi: ExtensionAPI) {
 		// Dormant: pi's default prompt stands, and it is correct — the builtin
 		// tools it describes are actually registered in this configuration.
 		if (!active()) return undefined;
+		if (!modelsSeed) {
+			modelsSeed = {
+				current: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+				subagentDefault: DEFAULT_SUBAGENT_MODEL,
+				available: ctx.modelRegistry.getAvailable().map((model) => `${model.provider}/${model.id}`),
+			};
+		}
 		const options = (event as { systemPromptOptions?: { contextFiles?: Array<{ path: string; content: string }> } })
 			.systemPromptOptions;
 		return {
@@ -139,6 +151,7 @@ export default function (pi: ExtensionAPI) {
 				// Fresh definitions for the prompt: signatures come from the same
 				// schemas the bridge validates against, so they cannot drift.
 				toolSummaries: createPiToolsHost({ cwd: ctx.cwd }).describe(),
+				models: modelsSeed,
 			}),
 		};
 	});
@@ -152,6 +165,8 @@ export default function (pi: ExtensionAPI) {
 		}
 		// Active: the whole LLM surface collapses to the one tool.
 		pi.setActiveTools(["execute"]);
+		// A new session may run under different auth or a different model.
+		modelsSeed = undefined;
 		// Revive a previous run's namespace before the first cell. This is the
 		// expected path, but never the only one: pi skips session_start on reload
 		// for extensions like this one, so the engine also revives itself when a

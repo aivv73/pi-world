@@ -17,6 +17,43 @@ export interface RlmPromptOptions {
 	contextFiles?: Array<{ path: string; content: string }>;
 	/** One line per mounted host tool, from the bridge's own schemas. */
 	toolSummaries?: string[];
+	/**
+	 * Model landscape, seeded once per session by the extension. The rendered
+	 * section is deterministic for identical inputs — the system prompt is
+	 * cached, and a shifting list would invalidate that cache every turn.
+	 */
+	models?: RlmPromptModels;
+}
+
+export interface RlmPromptModels {
+	/** What this agent itself is running, e.g. "anthropic/claude-fable-5". */
+	current?: string;
+	/** What children get when rlm.run names no model. */
+	subagentDefault: string;
+	/** Auth-configured "provider/id" strings. */
+	available: string[];
+}
+
+/** Group "provider/id" strings into stable "provider: id, id" lines. */
+function buildModelsSection(models: RlmPromptModels): string | undefined {
+	if (models.available.length === 0 && !models.current) return undefined;
+	const byProvider = new Map<string, string[]>();
+	for (const entry of [...models.available].sort()) {
+		const slash = entry.indexOf("/");
+		const provider = slash > 0 ? entry.slice(0, slash) : "other";
+		const id = slash > 0 ? entry.slice(slash + 1) : entry;
+		const ids = byProvider.get(provider) ?? [];
+		if (!ids.includes(id)) ids.push(id);
+		byProvider.set(provider, ids);
+	}
+	const lines = [
+		models.current ? `You are running ${models.current}.` : undefined,
+		`Children default to ${models.subagentDefault}; override per spawn with \`{ model: "provider/id" }\`.`,
+		byProvider.size > 0
+			? `Available models: ${[...byProvider.entries()].map(([provider, ids]) => `${provider}: ${ids.join(", ")}`).join(" · ")}`
+			: undefined,
+	].filter((line): line is string => line !== undefined);
+	return lines.join("\n");
 }
 
 const EVALUATOR_CONTROL_PROMPT = [
@@ -106,6 +143,8 @@ export function buildRlmTsPrompt(options: RlmPromptOptions): string {
 			"Spawn independent children in separate calls; collect their results from their output files.",
 		);
 		parts.push("", SUBAGENT_GUIDANCE);
+		const modelsSection = options.models ? buildModelsSection(options.models) : undefined;
+		if (modelsSection) parts.push("", modelsSection);
 	}
 
 	parts.push("", EVALUATOR_CONTROL_PROMPT);

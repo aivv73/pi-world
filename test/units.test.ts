@@ -270,6 +270,30 @@ describe("system prompt", () => {
 		expect(prompt).toMatch(/check .*status/i);
 	});
 
+	// The agent cannot pick a child model it has never heard of: the prompt
+	// carries what is actually available (auth-configured), what the parent
+	// itself runs, and the child default. The section must be byte-identical
+	// for identical inputs regardless of input order — the system prompt is
+	// cached, and a shifting list would invalidate the cache every turn.
+	test("model options are seeded deterministically into the subagent doctrine", () => {
+		const models = {
+			current: "anthropic/claude-fable-5",
+			subagentDefault: "anthropic/haiku",
+			available: ["openai/gpt-5.2", "anthropic/claude-haiku-4-5", "anthropic/claude-opus-4-6"],
+		};
+		const prompt = buildRlmTsPrompt({ cwd: "/w", allowRecursion: true, models });
+		expect(prompt).toContain("anthropic/claude-fable-5");
+		expect(prompt).toContain("anthropic/haiku");
+		expect(prompt).toContain("anthropic: claude-haiku-4-5, claude-opus-4-6");
+		expect(prompt).toContain("openai: gpt-5.2");
+
+		const shuffled = { ...models, available: [...models.available].reverse() };
+		expect(buildRlmTsPrompt({ cwd: "/w", allowRecursion: true, models: shuffled })).toBe(prompt);
+
+		// No models known: no section, not an empty shell.
+		expect(buildRlmTsPrompt({ cwd: "/w", allowRecursion: true })).not.toContain("Available models");
+	});
+
 	test("subagent guidance appears only when recursion is allowed", () => {
 		const withRecursion = buildRlmTsPrompt({ cwd: "/tmp", allowRecursion: true });
 		expect(withRecursion).toContain("rlm.run");
