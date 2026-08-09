@@ -548,6 +548,19 @@ describe("host bridge", () => {
 		expect(seen[0]?.source).toBeUndefined();
 	}, 15_000);
 
+	// The request path mirrors the reply path: a payload the protocol cannot
+	// encode fails the call in-cell with a real error, and the bridge stays
+	// fully usable afterwards — no half-registered request lingers.
+	test("a request payload the protocol cannot encode fails in-cell and leaves the bridge healthy", async () => {
+		const m = engine({ hostHandlers: { "test.echo2": async (payload) => ({ got: payload.v }) } });
+		const r1 = await m.execute('await rlm.hostRequest("test.echo2", { v: 1n }); "unreachable"');
+		expect(r1.status).toBe("error");
+		expect(r1.error?.message).toMatch(/JSON|serial|BigInt/i);
+		const r2 = await m.execute('(await rlm.hostRequest("test.echo2", { v: 7 })).got');
+		expect(r2.status).toBe("ok");
+		expect(r2.result).toContain("7");
+	});
+
 	// The reply path must never swallow its own failure: a host_reply whose
 	// payload cannot be encoded (BigInt, circular) used to vanish inside the
 	// dead-pipe guard, parking the awaiting cell forever with no error

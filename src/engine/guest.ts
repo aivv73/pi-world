@@ -261,7 +261,16 @@ function hostRequest(requestType: string, payload: Record<string, unknown> = {})
 	const cellId = (cellStorage.getStore() ?? activeCell)?.cellId ?? "";
 	return new Promise((resolve, reject) => {
 		pendingHostRequests.set(id, { cellId, resolve, reject });
-		send({ type: "host_request", id, cellId, requestType, payload });
+		try {
+			send({ type: "host_request", id, cellId, requestType, payload });
+		} catch (error) {
+			// A payload the protocol cannot encode (BigInt, circular) throws here,
+			// after the pending entry was registered. The throw correctly fails
+			// the caller, but the entry must not outlive it — nothing will ever
+			// reply to a request that was never sent.
+			pendingHostRequests.delete(id);
+			throw error;
+		}
 	});
 }
 

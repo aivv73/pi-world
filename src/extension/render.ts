@@ -65,6 +65,7 @@ function makeDeps(theme: Theme): RenderDeps {
  */
 function renderVersion(state: ExecuteRenderState): string {
 	const details = state.details ? JSON.stringify(state.details) : "";
+	const frames = state.frames ? frameKey(state.frames) : "";
 	return [
 		state.code.length,
 		state.contentText?.length ?? 0,
@@ -76,9 +77,9 @@ function renderVersion(state: ExecuteRenderState): string {
 		state.hasResult,
 		// Fold the animation frame in while running so the spinner still turns.
 		statusKind(state) === "running" ? Math.floor(Date.now() / 160) % 4 : -1,
-		state.frames ? frameKey(state.frames) : "",
+		frames,
 		// Frame spinners turn and ages tick while any subagent runs.
-		state.frames?.length && frameKey(state.frames).includes("running") ? Math.floor(Date.now() / 1000) : -1,
+		frames.includes("=running") ? Math.floor(Date.now() / 1000) : -1,
 	].join("|");
 }
 
