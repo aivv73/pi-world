@@ -50,6 +50,23 @@ export interface SubagentHostOptions {
 
 export const MAX_SUBAGENT_NAME_LENGTH = 64;
 
+/**
+ * What children run when rlm.run names no model. A hardcoded default breaks
+ * every session whose auth cannot spawn it, so the choice degrades: explicit
+ * override, then the cheap anthropic default when anthropic is actually
+ * available, then the parent's own model — valid by construction. The bare
+ * fallback only applies when nothing is known, where any guess fails equally.
+ */
+export function resolveDefaultSubagentModel(options: {
+	override?: string;
+	available: string[];
+	current?: string;
+}): string {
+	if (options.override) return options.override;
+	if (options.available.some((entry) => entry.startsWith("anthropic/"))) return "anthropic/haiku";
+	return options.current ?? "anthropic/haiku";
+}
+
 export function defaultSubagentName(prompt: string, childId: string): string {
 	const slug = prompt
 		.normalize("NFKD")

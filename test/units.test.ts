@@ -26,7 +26,12 @@ import {
 	renderExecuteCell,
 	statusKind,
 } from "../src/extension/render-core.js";
-import { createSubagentHost, defaultSubagentName, MAX_SUBAGENT_NAME_LENGTH } from "../src/extension/subagents.js";
+import {
+	createSubagentHost,
+	defaultSubagentName,
+	MAX_SUBAGENT_NAME_LENGTH,
+	resolveDefaultSubagentModel,
+} from "../src/extension/subagents.js";
 
 // ── transform ─────────────────────────────────────────────────────────────────
 
@@ -268,6 +273,28 @@ describe("system prompt", () => {
 		expect(prompt).toContain("wall time");
 		expect(prompt).toMatch(/children start with no context/i);
 		expect(prompt).toMatch(/check .*status/i);
+	});
+
+	// A hardcoded child default breaks every session whose auth cannot spawn
+	// it, and the prompt would teach the broken default confidently. The env
+	// override wins; the cheap anthropic default applies only when anthropic
+	// is actually available; otherwise children inherit the parent's model,
+	// which is valid by construction.
+	test("the subagent default degrades from override to cheap to inherit", () => {
+		const available = ["openai/gpt-5.2", "openai/gpt-5-mini"];
+		expect(resolveDefaultSubagentModel({ override: "openai/gpt-5-mini", available, current: "openai/gpt-5.2" })).toBe(
+			"openai/gpt-5-mini",
+		);
+		expect(
+			resolveDefaultSubagentModel({
+				available: ["anthropic/claude-haiku-4-5", ...available],
+				current: "openai/gpt-5.2",
+			}),
+		).toBe("anthropic/haiku");
+		expect(resolveDefaultSubagentModel({ available, current: "openai/gpt-5.2" })).toBe("openai/gpt-5.2");
+		// Nothing known at all: the historical default, which start-up reporting
+		// will surface as a spawn failure rather than a silent wrong guess.
+		expect(resolveDefaultSubagentModel({ available: [] })).toBe("anthropic/haiku");
 	});
 
 	// The agent cannot pick a child model it has never heard of: the prompt

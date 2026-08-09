@@ -15,7 +15,7 @@ import { createPiToolsHost, type PiToolsHost } from "./pi-tools.js";
 import { buildRlmTsPrompt, type RlmPromptModels } from "./prompt.js";
 import { ExecuteCellComponent, type ExecuteDetails, type ExecuteRenderState, makeFrameSource } from "./render.js";
 import { EngineLifecycle, summarizeNames } from "./session-engine.js";
-import { createSubagentHost, type SubagentHost } from "./subagents.js";
+import { createSubagentHost, resolveDefaultSubagentModel, type SubagentHost } from "./subagents.js";
 
 const executeSchema = Type.Object({
 	code: Type.String({
@@ -52,7 +52,7 @@ function composeErrorLines(error: { name: string; message: string; stack: string
 	return stack[0]?.trim() === header ? stack : [header, ...stack];
 }
 
-const DEFAULT_SUBAGENT_MODEL = process.env.PI_RLM_SUBAGENT_MODEL ?? "anthropic/haiku";
+const SUBAGENT_MODEL_OVERRIDE = process.env.PI_RLM_SUBAGENT_MODEL;
 const DEPTH = Number(process.env.PI_RLM_DEPTH ?? "0");
 const MAX_DEPTH = Number(process.env.PI_RLM_MAX_DEPTH ?? "2");
 /** Set by the parent's spawn: this agent's own id, linking its frames upward. */
@@ -87,6 +87,22 @@ export default function (pi: ExtensionAPI) {
 	// that may shift (registry refresh, auth changes) would invalidate that
 	// cache on every turn. A new session starts fresh.
 	let modelsSeed: RlmPromptModels | undefined;
+	// Resolved against actual availability the first time a context offers the
+	// registry; a hardcoded default would break every session whose auth cannot
+	// spawn it. Falls back sensibly until then (engines can be created before
+	// any event carries the registry).
+	let subagentDefault = resolveDefaultSubagentModel({ override: SUBAGENT_MODEL_OVERRIDE, available: [] });
+
+	const resolveModels = (ctx: {
+		model?: { provider: string; id: string } | undefined;
+		modelRegistry?: { getAvailable(): Array<{ provider: string; id: string }> };
+	}): void => {
+		if (modelsSeed || !ctx.modelRegistry) return;
+		const current = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+		const available = ctx.modelRegistry.getAvailable().map((model) => `${model.provider}/${model.id}`);
+		subagentDefault = resolveDefaultSubagentModel({ override: SUBAGENT_MODEL_OVERRIDE, available, current });
+		modelsSeed = { current, subagentDefault, available };
+	};
 
 	const lifecycle = new EngineLifecycle<EngineManager>({
 		create() {
@@ -96,7 +112,7 @@ export default function (pi: ExtensionAPI) {
 			subagents = createSubagentHost({
 				cwd,
 				subagentDir: join(stateDir, "subagents"),
-				defaultModel: DEFAULT_SUBAGENT_MODEL,
+				defaultModel: subagentDefault,
 				depth: DEPTH,
 				maxDepth: MAX_DEPTH,
 				selfChildId: SELF_CHILD_ID,
@@ -132,13 +148,7 @@ export default function (pi: ExtensionAPI) {
 		// Dormant: pi's default prompt stands, and it is correct — the builtin
 		// tools it describes are actually registered in this configuration.
 		if (!active()) return undefined;
-		if (!modelsSeed) {
-			modelsSeed = {
-				current: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
-				subagentDefault: DEFAULT_SUBAGENT_MODEL,
-				available: ctx.modelRegistry.getAvailable().map((model) => `${model.provider}/${model.id}`),
-			};
-		}
+		resolveModels(ctx);
 		const options = (event as { systemPromptOptions?: { contextFiles?: Array<{ path: string; content: string }> } })
 			.systemPromptOptions;
 		return {
@@ -167,6 +177,9 @@ export default function (pi: ExtensionAPI) {
 		pi.setActiveTools(["execute"]);
 		// A new session may run under different auth or a different model.
 		modelsSeed = undefined;
+		// Resolve before the engine is built below, so the subagent host is
+		// created with the availability-aware default, not the fallback.
+		resolveModels(ctx);
 		// Revive a previous run's namespace before the first cell. This is the
 		// expected path, but never the only one: pi skips session_start on reload
 		// for extensions like this one, so the engine also revives itself when a
