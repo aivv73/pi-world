@@ -22,6 +22,11 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+      # pi's grep/find tools shell out to ripgrep and download it on demand
+      # when missing. That download comes from the GitHub releases API, which
+      # rate-limits anonymous runners — a flaky 403 turns into a red suite.
+      # Preinstalling removes the network dependency entirely.
+      - run: brew install ripgrep fd
       - run: bun install --frozen-lockfile
       - name: Typecheck, lint, and test
         run: bun run check
