@@ -234,9 +234,9 @@ export function createSubagentHost(options: SubagentHostOptions): SubagentHost {
 				cwd: options.cwd,
 				detached: false,
 				stdio: ["ignore", outFd, outFd],
-				// PI_RLM_FORCE activates the child regardless of flag plumbing: the
-				// child loads this extension via -e and must enter the RLM world
-				// without depending on --rlm surviving pi's argv handling.
+				// --no-extensions plus one -e load prevents an installed copy from
+				// activating a second time. PI_RLM_FORCE remains a compatibility
+				// environment variable for older pi-rlm-derived children.
 				// PI_RLM_CHILD_ID tells the child its own id, so the frame records it
 				// writes for grandchildren carry the link back to this one.
 				env: {

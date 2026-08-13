@@ -8,13 +8,14 @@
  */
 
 import { basename, join } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { EngineBusyError, EngineManager } from "../engine/index.js";
 import { createPiToolsHost, type PiToolsHost } from "./pi-tools.js";
 import { buildRlmTsPrompt, type RlmPromptModels } from "./prompt.js";
 import { ExecuteCellComponent, type ExecuteDetails, type ExecuteRenderState, makeFrameSource } from "./render.js";
 import { EngineLifecycle, summarizeNames } from "./session-engine.js";
+import { type SessionWorld, SessionWorldOwner } from "./session-world.js";
 import { createSubagentHost, resolveDefaultSubagentModel, type SubagentHost } from "./subagents.js";
 
 const executeSchema = Type.Object({
@@ -59,16 +60,6 @@ const MAX_DEPTH = Number(process.env.PI_RLM_MAX_DEPTH ?? "2");
 const SELF_CHILD_ID = process.env.PI_RLM_CHILD_ID;
 
 export default function (pi: ExtensionAPI) {
-	pi.registerFlag("rlm", {
-		type: "boolean",
-		description: "Single execute tool backed by a persistent TypeScript evaluator; replaces the default tool surface",
-	});
-	// CLI flag values are injected after extension factories run (verified by
-	// probe: getFlag is undefined here, true in every event), so activation is
-	// decided per event, never at load. PI_RLM_FORCE is the dev escape hatch:
-	// subagent children and test rigs activate without flag plumbing.
-	const active = () => pi.getFlag("rlm") === true || process.env.PI_RLM_FORCE === "1";
-
 	let subagents: SubagentHost | undefined;
 	let piTools: PiToolsHost | undefined;
 	// A tool error must be thrown for pi to mark the call as failed, but pi's
@@ -80,8 +71,16 @@ export default function (pi: ExtensionAPI) {
 		string,
 		{ details: ExecuteDetails; images: Array<{ type: "image"; data: string; mimeType: string }> }
 	>();
-	// Where the engine will be built from, captured by whichever event runs first.
-	let location = { cwd: process.cwd(), sessionFile: undefined as string | undefined };
+	// Where the session runtime will be built from, captured by whichever event
+	// runs first. Context remains live because model/auth state can change.
+	let location = {
+		cwd: process.cwd(),
+		sessionFile: undefined as string | undefined,
+		sessionId: "ephemeral",
+	};
+	let latestContext: ExtensionContext | undefined;
+	let worldSessionId: string | undefined;
+	const worldOwner = new SessionWorldOwner();
 	// The model landscape for the prompt, computed at the first agent start and
 	// held for the session: the system prompt is cached, and recomputing a list
 	// that may shift (registry refresh, auth changes) would invalidate that
@@ -104,6 +103,23 @@ export default function (pi: ExtensionAPI) {
 		modelsSeed = { current, subagentDefault, available };
 	};
 
+	const ensureSessionWorld = (stateDir: string): SessionWorld => {
+		worldSessionId = location.sessionId;
+		return worldOwner.acquire({
+			cwd: location.cwd,
+			extensionPath: join(import.meta.dirname, "index.ts"),
+			sessionDir: join(stateDir, "world-agents"),
+			sessionId: location.sessionId,
+			defaultModel: subagentDefault,
+			depth: DEPTH,
+			maxDepth: MAX_DEPTH,
+			getContext: () => {
+				if (!latestContext) throw new Error("Pi session context is not available");
+				return latestContext;
+			},
+		});
+	};
+
 	const lifecycle = new EngineLifecycle<EngineManager>({
 		create() {
 			const { cwd, sessionFile } = location;
@@ -118,13 +134,15 @@ export default function (pi: ExtensionAPI) {
 				selfChildId: SELF_CHILD_ID,
 			});
 			piTools = createPiToolsHost({ cwd });
-			return new EngineManager({
+			const world = ensureSessionWorld(stateDir);
+			const engine = new EngineManager({
 				cwd,
-				hostHandlers: { ...subagents.handlers, ...piTools.handlers },
+				hostHandlers: { ...subagents.handlers, ...piTools.handlers, ...world.handlers },
 				// A snapshot is keyed to a session file; an ephemeral session has none
 				// to key it to, so its namespace lives and dies with the process.
 				snapshot: sessionKey ? { path: join(stateDir, "namespace.snapshot") } : undefined,
 			});
+			return engine;
 		},
 		async dispose(engine) {
 			subagents?.killAll();
@@ -141,13 +159,20 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	const shutdownSession = async () => {
+		try {
+			await lifecycle.shutdown();
+		} finally {
+			await worldOwner.shutdown();
+			worldSessionId = undefined;
+		}
+	};
+
 	// Replace pi's default prompt wholesale. It describes read, bash, and edit
 	// tools that this configuration does not register, and a prompt that
 	// advertises absent tools is worse than no prompt at all.
 	pi.on("before_agent_start", async (event, ctx) => {
-		// Dormant: pi's default prompt stands, and it is correct — the builtin
-		// tools it describes are actually registered in this configuration.
-		if (!active()) return undefined;
+		latestContext = ctx;
 		resolveModels(ctx);
 		const options = (event as { systemPromptOptions?: { contextFiles?: Array<{ path: string; content: string }> } })
 			.systemPromptOptions;
@@ -167,13 +192,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		if (!active()) {
-			// registerTool ran at load (the flag was unreadable then), so a stock
-			// session must actively drop execute from the surface to stay stock.
-			pi.setActiveTools(pi.getActiveTools().filter((name) => name !== "execute"));
-			return;
-		}
-		// Active: the whole LLM surface collapses to the one tool.
+		// Installed means active: the whole LLM surface collapses to one tool.
 		pi.setActiveTools(["execute"]);
 		// A new session may run under different auth or a different model.
 		modelsSeed = undefined;
@@ -184,7 +203,14 @@ export default function (pi: ExtensionAPI) {
 		// expected path, but never the only one: pi skips session_start on reload
 		// for extensions like this one, so the engine also revives itself when a
 		// cell has to build it. See session-engine.ts.
-		location = { cwd: ctx.cwd, sessionFile: ctx.sessionManager.getSessionFile() ?? undefined };
+		latestContext = ctx;
+		const sessionId = ctx.sessionManager.getSessionId();
+		if (worldSessionId !== undefined && worldSessionId !== sessionId) await shutdownSession();
+		location = {
+			cwd: ctx.cwd,
+			sessionFile: ctx.sessionManager.getSessionFile() ?? undefined,
+			sessionId,
+		};
 		const { restore } = await lifecycle.acquire("startup");
 		if (restore && restore.restored.length > 0) {
 			pi.sendMessage({
@@ -202,9 +228,7 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("session_shutdown", async () => {
-		await lifecycle.shutdown();
-	});
+	pi.on("session_shutdown", shutdownSession);
 
 	pi.on("tool_result", async (event) => {
 		if (event.toolName !== "execute") return undefined;
@@ -223,7 +247,8 @@ export default function (pi: ExtensionAPI) {
 			"Execute TypeScript in a persistent Bun evaluator. Variables, imports, and loaded data persist across calls. " +
 			"Top-level await works. Shell: const out = await Bun.$`cmd`.quiet(); out.stdout.toString(). " +
 			"pi's file tools are mounted as tools.* (tools.read, tools.edit, tools.grep, ...). " +
-			"Subagents: await rlm.run(prompt) returns an admission handle; the child's answer lands in handle.output_file. " +
+			"World: world.agents provides event-backed Pi children and world.web provides hidden Codex search. " +
+			"Legacy subagents remain available through rlm.run(prompt), whose answer lands in handle.output_file. " +
 			"The final expression of the cell is returned as the result.",
 		parameters: executeSchema,
 		renderShell: "self",
@@ -251,10 +276,17 @@ export default function (pi: ExtensionAPI) {
 			return { render: () => [], invalidate: () => {} };
 		},
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
-			if (!active()) {
-				throw new Error("pi-rlm is dormant in this session. Start pi with --rlm (or PI_RLM_FORCE=1) to use execute.");
+			if (ctx?.cwd) {
+				latestContext = ctx;
+				resolveModels(ctx);
+				const sessionId = ctx.sessionManager.getSessionId();
+				if (worldSessionId !== undefined && worldSessionId !== sessionId) await shutdownSession();
+				location = {
+					cwd: ctx.cwd,
+					sessionFile: ctx.sessionManager.getSessionFile() ?? undefined,
+					sessionId,
+				};
 			}
-			if (ctx?.cwd) location = { cwd: ctx.cwd, sessionFile: ctx.sessionManager?.getSessionFile?.() ?? undefined };
 			// Building the engine here means the previous one went away mid-session;
 			// acquire revives it and arms the notice this cell will carry.
 			const { engine: m } = await lifecycle.acquire("cell");

@@ -116,7 +116,7 @@ const appendOutput = (record: AttemptRecord, channel: "stdout" | "stderr", chunk
 
 const resultOutput = (record: AttemptRecord) => record.stdout.trim();
 
-const childSpec = (options: PiProcessAgentsOptions, input: PiChildSpawnInput): PiChildSpec => {
+export const makePiChildSpec = (options: PiProcessAgentsOptions, input: PiChildSpawnInput): PiChildSpec => {
 	if (options.spawnCommand) return options.spawnCommand(input);
 	if (!options.extensionPath) throw new Error("PiProcessAgents requires extensionPath when spawnCommand is omitted");
 	const model = input.request.model || options.defaultModel;
@@ -236,7 +236,7 @@ export const makePiProcessAgents = (options: PiProcessAgentsOptions): PiProcessA
 				});
 				let child: ChildProcess;
 				try {
-					const spec = childSpec(options, { handle, request });
+					const spec = makePiChildSpec(options, { handle, request });
 					child = spawn(spec.command, [...spec.args], {
 						cwd: options.cwd,
 						detached: true,

@@ -52,10 +52,10 @@ the engine never discards agent state on its own.
 object with an exit code and captured output, ready to be assigned and filtered.
 No parsing a transcript to recover what a command said.
 
-**Subagents as function calls.** `await rlm.run("task")` spawns a real child
-agent and returns a handle at admission. Children write their answers to files;
-the parent polls the registry and reads them when it wants. Delegation happens
-mid-computation instead of as a separate mode.
+**World agents as event-backed calls.** `await world.agents.spawn("task")`
+returns an ergonomic handle at admission; `wait()` settles from process close
+and `cancel()` awaits bounded cleanup. `spawnMany()` admits a fan-out before
+anything is awaited. Legacy `rlm.run` remains available for compatibility.
 
 **Cancellation that costs one cell.** Interrupting a running cell leaves the
 namespace intact, and the cancelled cell cannot keep writing to it afterwards.
@@ -75,30 +75,24 @@ curl -fsSL https://bun.sh/install | bash
 
 ## Launch
 
-The baseline keeps pi-rlm's explicit activation flag while the always-on World
-runtime is wired in. A plain `pi` session is untouched until that integration
-lands; activation is one flag:
+The installed package is always active. A normal Pi session collapses the
+model-visible tool surface to `execute`, replaces the system prompt, and mounts
+live `world`, `rlm`, and `tools` evaluator bindings:
 
 ```bash
-pi --rlm
+pi
 ```
 
-That collapses the tool surface to `execute` and replaces the system prompt;
-no other pi flags are needed. To verify the two worlds:
-
-```bash
-pi -p "what tools do you have?"          # stock pi: read, bash, edit, ...
-pi -p --rlm "what tools do you have?"    # one tool: execute
-```
-
-To run from a clone (development), load the extension explicitly — the flag
-works the same, or set `PI_RLM_FORCE=1` where flag plumbing is awkward:
+To run from a clone, load the extension explicitly:
 
 ```bash
 git clone https://github.com/aivv73/pi-world && cd pi-world
 bun install
-pi --rlm -e ./src/extension/index.ts
+pi --no-extensions -e ./src/extension/index.ts
 ```
+
+World children use the same `--no-extensions -e <this fork>` shape, so an
+installed copy cannot load a child extension twice.
 
 ### Configuration
 
@@ -165,7 +159,8 @@ src/engine/      the evaluator
   transform.ts   cell source → executable body
   npm.ts         lazy, isolated installs behind npm: imports
 src/extension/   the pi integration
-  index.ts       tool registration, session wiring
+  index.ts       always-on tool registration and session wiring
+  session-world.ts  session-owned Effect runtime and scope
   prompt.ts      the system prompt
   subagents.ts   spawning, registry, file-based results
   render-core.ts cell layout (pure)

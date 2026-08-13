@@ -101,6 +101,18 @@ function buildChildDoctrine(options: RlmPromptOptions): string | undefined {
 	].join("\n");
 }
 
+const WORLD_GUIDANCE = [
+	"# World capabilities",
+	"",
+	"A live-only `world` facade is mounted beside the compatibility `rlm` and `tools` bindings. It is host-owned and must not be replaced or treated as snapshot data.",
+	"",
+	"`await world.agents.spawn(task, options?)` admits one session-owned Pi child and returns `{ id, agentId, attemptId, wait(options?), cancel() }`. `await world.agents.spawnMany(tasks)` admits every child before returning the handles. Await handle `wait()` promises directly; there is deliberately no World list/status polling API.",
+	"",
+	"`await world.web.search(query)` runs hidden Codex web search through the host's current model/auth context. `web_run` is not a model-visible tool.",
+	"",
+	"World handles are live closures and do not survive evaluator restart or session resume. Plain IDs and terminal result data may be retained, but do not assume an old execution can be resumed.",
+].join("\n");
+
 const SUBAGENT_GUIDANCE = [
 	"# Delegating to sub-agents",
 	"",
@@ -147,7 +159,7 @@ export function buildRlmTsPrompt(options: RlmPromptOptions): string {
 		if (modelsSection) parts.push("", modelsSection);
 	}
 
-	parts.push("", EVALUATOR_CONTROL_PROMPT);
+	parts.push("", WORLD_GUIDANCE, "", EVALUATOR_CONTROL_PROMPT);
 
 	if (options.toolSummaries && options.toolSummaries.length > 0) {
 		parts.push("", buildHostToolsSection(options.toolSummaries));

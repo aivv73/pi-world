@@ -6,12 +6,13 @@ Two processes. The host lives inside pi; the guest owns the namespace.
 
 ```
 pi
- └─ extension            registers the execute tool, owns the session wiring
-     └─ EngineManager    lifecycle, execution queue, output accounting, snapshots
-         │  stdin   ──▶  commands
-         │  fd 3    ◀──  protocol: results, output, host requests
-         │  stdout  ◀──  subprocess output only
-         └─ guest (bun)  namespace, cell execution, host bridge
+ └─ extension             always exposes execute; owns the Pi session
+     ├─ SessionWorldOwner one ManagedRuntime and Agents scope per session
+     └─ EngineManager     replaceable evaluator generation, queue, snapshots
+         │  stdin   ──▶   commands
+         │  fd 3    ◀──   protocol: results, output, host requests
+         │  stdout  ◀──   subprocess output only
+         └─ guest (bun)   namespace, cell execution, host bridge
 ```
 
 Splitting them is what makes the evaluator survivable. A cell can wedge the
@@ -171,7 +172,8 @@ completed, or errored, so the parent decides when to read.
 The guest installs an engine-owned `world` object beside the compatibility
 `rlm` and `tools` bindings. Its methods are ordinary Promise APIs over the
 same authenticated host bridge; Effect, Layers, process handles, and authority
-state remain host-side.
+state remain host-side. Installing this package is activation: `session_start`
+always sets Pi's model-visible tools to exactly `["execute"]`.
 
 `world.agents.spawn` returns an ergonomic live handle with `wait` and
 `cancel`, and `spawnMany` admits every requested agent before callers await
@@ -179,6 +181,14 @@ results. There is deliberately no list/status API: completion is an event-backed
 Promise rather than model-written polling. The host reconstructs the authority
 subject from its own session, depth, and issuing-cell context, schema-decodes
 requests before adapters run, and sends only stable safe error fields back.
+
+One `SessionWorldOwner` creates the Authority, Agents, and Web Layers for the
+Pi session, not for an execute cell or evaluator generation. A wedged evaluator
+can be discarded and rebuilt while admitted World children continue; session
+shutdown disposes the managed runtime, whose Agents Layer performs bounded
+process-group cleanup and awaits child close. World child Pi commands use
+`--no-extensions` and exactly one `-e` path to this fork, preventing an
+installed copy from loading twice.
 
 The live `world` binding is registered in the same internal-binding table as
 `rlm` and `tools`. Snapshots skip it, namespace listing hides it, and
@@ -251,6 +261,10 @@ real engine and a real guest, each stating a guarantee and its rationale.
 layout, including the width invariant that keeps a row's metadata legible at any
 terminal size.
 
-`test/subagents.test.ts` covers delegation with an injected spawn command.
+`test/subagents.test.ts` covers legacy delegation with an injected spawn command.
+
+`test/session-world.test.ts` covers always-on extension activation, one World
+scope across evaluator generations, exact child extension loading, and awaited
+session-shutdown process cleanup.
 
 `bun run check` is the gate: typecheck, lint, and the full suite.
