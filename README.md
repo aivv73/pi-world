@@ -1,7 +1,15 @@
 # pi-world
 
-An experimental [pi](https://pi.dev) extension that replaces the usual toolbox with a single
-tool: **`execute`**, which runs TypeScript in a persistent Bun evaluator.
+> **The agent's environment is itself a programmable object model.**
+
+pi-world is a JavaScript-native persistent object world for agents, combining
+RLM-style programmable context and recursive cognition with a continual,
+eventually reflective harness. The agent interacts with context, tools, models,
+agents, memory, and ultimately its own harness through one uniform object model.
+
+It is an experimental [pi](https://pi.dev) extension that replaces the usual
+toolbox with a single tool: **`execute`**, which runs TypeScript in a persistent
+Bun evaluator.
 
 Everything an agent would normally reach for a separate tool to do — reading
 files, running shell commands, editing, searching, delegating to subagents — is
