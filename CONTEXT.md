@@ -11,3 +11,7 @@ _Avoid_: safe shell, sandbox shell
 **Host Shell**:
 A shell environment authorized to operate on the real project and invoke its native toolchain.
 _Avoid_: normal shell, system shell
+
+**Host Script Profile**:
+A policy-owned, fixed interpreter configuration that gives every authorized Host Shell script an explicit dialect identity.
+_Avoid_: selected shell, default shell
