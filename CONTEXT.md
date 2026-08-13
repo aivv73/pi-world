@@ -40,6 +40,10 @@ _Avoid_: shell access, permissions object
 The versioned, immutable public record of one admitted shell execution's outcome, bounded output, cleanup, and side-effect disposition.
 _Avoid_: command response, process result
 
+**Safe Shell Certification**:
+The signed, reproducible evidence that one exact release and platform matrix satisfies every mandatory shell contract, adapter, evaluator, and live-agent scenario.
+_Avoid_: test run, release checklist
+
 **Command Profile**:
 A policy-owned Host Shell command identity binding a resolved executable to fixed arguments and argument, environment, working-directory, and resource constraints.
 _Avoid_: command name, executable path
