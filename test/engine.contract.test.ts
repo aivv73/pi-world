@@ -15,7 +15,7 @@ import { copyFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { EngineBusyError, EngineManager } from "../src/engine/index.js";
+import { EngineBusyError, EngineManager, HostRequestError } from "../src/engine/index.js";
 
 const managers: EngineManager[] = [];
 const tempDirs: string[] = [];
@@ -808,6 +808,28 @@ describe("host bridge", () => {
 		expect(r.error?.message).toContain("no.such.type");
 	});
 
+	test("structured host failures retain safe machine fields without losing the message", async () => {
+		// Promise facades need stable codes for programmatic recovery, while the
+		// message remains the small host-selected text rather than an internal stack.
+		const m = engine({
+			hostHandlers: {
+				"test.typed-failure": async () => {
+					throw new HostRequestError("safe boundary failure", {
+						_tag: "TestBoundaryFailure",
+						code: "TEST_BOUNDARY_FAILURE",
+					});
+				},
+			},
+		});
+		const r = await m.execute(
+			'let caught; try { await rlm.hostRequest("test.typed-failure", {}); } catch (error) { caught = { code: error.code, tag: error._tag, message: error.message }; } caught',
+		);
+		expect(r.status).toBe("ok");
+		expect(r.result).toContain("TEST_BOUNDARY_FAILURE");
+		expect(r.result).toContain("TestBoundaryFailure");
+		expect(r.result).toContain("safe boundary failure");
+	});
+
 	test("host handler throwing surfaces as a guest-side error with the message", async () => {
 		const m = engine({
 			hostHandlers: {
@@ -864,22 +886,22 @@ describe("snapshot/restore", () => {
 		expect((await m2.execute("good")).result).toContain("7");
 	});
 
-	test("restore-before-bootstrap: a snapshotted `rlm` impostor cannot shadow the live handle", async () => {
+	test("restore-before-bootstrap: snapshotted engine-binding impostors cannot shadow live handles", async () => {
 		// Restoring happens before the runtime's own bindings are installed, so a
 		// stale value saved under an engine-owned name cannot shadow the live one.
 		const d = tempDir();
 		const snapshot = { path: join(d, "ns.snapshot") };
 		const m1 = engine({ snapshot, hostHandlers: { "test.ping": async () => ({ pong: true }) } });
-		await m1.execute('var rlm = "dead-impostor"; let n = 1;');
+		await m1.execute('var rlm = "dead-impostor"; var world = "dead-world-impostor"; let n = 1;');
 		await m1.snapshotState();
 		await m1.kill();
 
 		const m2 = engine({ snapshot, hostHandlers: { "test.ping": async () => ({ pong: true }) } });
 		await m2.start();
 		await m2.restoreState();
-		const r = await m2.execute('(await rlm.hostRequest("test.ping", {})).pong');
+		const r = await m2.execute('(await rlm.hostRequest("test.ping", {})).pong && typeof world.agents.spawn');
 		expect(r.status).toBe("ok");
-		expect(r.result).toContain("true");
+		expect(r.result).toContain("function");
 		expect((await m2.execute("n")).result).toContain("1");
 	});
 
@@ -1084,10 +1106,14 @@ describe("namespace economy", () => {
 describe("namespace listing", () => {
 	test("lists user-defined names, excluding engine internals", async () => {
 		const m = engine();
-		await m.execute("let userVarOne = 1; function userFnTwo() {}");
+		const bindings = await m.execute(
+			'let userVarOne = 1; function userFnTwo() {} typeof rlm + ":" + typeof tools + ":" + typeof world',
+		);
+		expect(bindings.result).toContain("object:object:object");
 		const names = await m.listNamespaceNames();
 		expect(names).toEqual(expect.arrayContaining(["userVarOne", "userFnTwo"]));
 		expect(names).not.toContain("rlm");
+		expect(names).not.toContain("world");
 	});
 });
 

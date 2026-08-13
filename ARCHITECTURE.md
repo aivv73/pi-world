@@ -166,6 +166,26 @@ could not supervise it, and a handle is useful immediately while an answer is
 not. Children write their final output to a file; the registry reports running,
 completed, or errored, so the parent decides when to read.
 
+### World is a live facade, not snapshot data
+
+The guest installs an engine-owned `world` object beside the compatibility
+`rlm` and `tools` bindings. Its methods are ordinary Promise APIs over the
+same authenticated host bridge; Effect, Layers, process handles, and authority
+state remain host-side.
+
+`world.agents.spawn` returns an ergonomic live handle with `wait` and
+`cancel`, and `spawnMany` admits every requested agent before callers await
+results. There is deliberately no list/status API: completion is an event-backed
+Promise rather than model-written polling. The host reconstructs the authority
+subject from its own session, depth, and issuing-cell context, schema-decodes
+requests before adapters run, and sends only stable safe error fields back.
+
+The live `world` binding is registered in the same internal-binding table as
+`rlm` and `tools`. Snapshots skip it, namespace listing hides it, and
+bootstrap overwrites any stale impostor restored under that name. Agent handles
+contain closures and are intentionally reported as unserialisable; persist a
+plain AgentId only, without treating it as a resumable execution.
+
 ### pi's tools are mounted behind the bridge, not registered with pi
 
 The session runs with pi's builtin tools disabled; the model's only tool is

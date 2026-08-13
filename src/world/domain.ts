@@ -17,7 +17,7 @@ export type JsonValue =
 	| ReadonlyArray<JsonValue>
 	| { readonly [key: string]: JsonValue };
 
-export const JsonValueSchema: Schema.Schema<JsonValue> = Schema.suspend(() =>
+export const JsonValueSchema: Schema.Decoder<JsonValue> = Schema.suspend(() =>
 	Schema.Union([
 		Schema.Null,
 		Schema.Boolean,
@@ -42,6 +42,20 @@ export const WorldOperationSchema = Schema.Literals([
 	"web.search",
 ] as const);
 export type WorldOperation = typeof WorldOperationSchema.Type;
+
+const WorldInvalidRequestSchema = Schema.Struct({
+	_tag: Schema.Literal("WorldInvalidRequest"),
+	code: Schema.Literal("WORLD_INVALID_REQUEST"),
+	operation: WorldOperationSchema,
+	message: Schema.String,
+});
+
+const WorldInternalErrorSchema = Schema.Struct({
+	_tag: Schema.Literal("WorldInternalError"),
+	code: Schema.Literal("WORLD_INTERNAL_ERROR"),
+	operation: WorldOperationSchema,
+	message: Schema.String,
+});
 
 const WorldDeniedSchema = Schema.Struct({
 	_tag: Schema.Literal("WorldDenied"),
@@ -92,6 +106,8 @@ const WebSearchErrorSchema = Schema.Struct({
 });
 
 export const WorldErrorSchema = Schema.Union([
+	WorldInvalidRequestSchema,
+	WorldInternalErrorSchema,
 	WorldDeniedSchema,
 	AgentSpawnErrorSchema,
 	AgentNotFoundErrorSchema,

@@ -16,3 +16,4 @@ export const WorldLive = (options: WorldRuntimeOptions) =>
 	);
 
 export const makeWorldRuntime = (options: WorldRuntimeOptions) => ManagedRuntime.make(WorldLive(options));
+export type WorldRuntime = ReturnType<typeof makeWorldRuntime>;

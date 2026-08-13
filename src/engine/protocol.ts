@@ -26,6 +26,8 @@ export interface HostToGuest {
 		status: "ok" | "error";
 		payload?: Record<string, unknown>;
 		error?: string;
+		/** JSON-safe structured fields for capability boundary failures. */
+		errorPayload?: Record<string, unknown>;
 	};
 	snapshot: { type: "snapshot"; id: string };
 	restore: {

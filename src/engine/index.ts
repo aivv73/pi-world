@@ -103,6 +103,20 @@ export type HostRequestHandler = (
 ) => Promise<Record<string, unknown>>;
 export type HostRequestHandlers = Record<string, HostRequestHandler>;
 
+/**
+ * A host capability can reject with stable JSON-safe fields without exposing
+ * implementation stack traces or Effect's internal FiberFailure rendering.
+ */
+export class HostRequestError extends Error {
+	constructor(
+		message: string,
+		readonly payload: Record<string, unknown>,
+	) {
+		super(message);
+		this.name = "HostRequestError";
+	}
+}
+
 export interface SnapshotResult {
 	path: string;
 	/** Top-level names successfully serialized. */
@@ -518,7 +532,13 @@ export class EngineManager {
 			this.sendToGuest({ type: "host_reply", id, status: "ok", payload: reply });
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			this.sendToGuest({ type: "host_reply", id, status: "error", error: message });
+			this.sendToGuest({
+				type: "host_reply",
+				id,
+				status: "error",
+				error: message,
+				errorPayload: error instanceof HostRequestError ? error.payload : undefined,
+			});
 		}
 	}
 

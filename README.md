@@ -173,6 +173,7 @@ src/extension/   the pi integration
 src/world/        experimental Effect-native runtime core
   domain.ts       IDs, schemas, terminal results, and safe errors
   services.ts     Authority, Agents, and Web contracts
+  bridge.ts       schema/authority boundary for the guest world facade
   runtime.ts      Layer composition and ManagedRuntime factory
   pi-process-agents.ts  session-scoped Pi child process adapter
 ```

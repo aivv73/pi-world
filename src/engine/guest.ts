@@ -339,6 +339,52 @@ for (const name of TOOL_NAMES) {
 		(await hostRequest("tools.call", { name, args })) as ToolReply;
 }
 
+interface WorldAgentHandleData extends Record<string, unknown> {
+	agentId: string;
+	attemptId: string;
+}
+
+interface WorldAgentHandle extends WorldAgentHandleData {
+	/** Ergonomic alias; AgentId remains the boundary/domain spelling. */
+	id: string;
+	wait(options?: { timeoutMs?: number }): Promise<Record<string, unknown>>;
+	cancel(): Promise<void>;
+}
+
+function makeWorldAgentHandle(data: WorldAgentHandleData): WorldAgentHandle {
+	return {
+		...data,
+		id: data.agentId,
+		async wait(options: { timeoutMs?: number } = {}) {
+			return hostRequest("world.agents.wait", {
+				request: { agentId: data.agentId, timeoutMs: options.timeoutMs },
+			});
+		},
+		async cancel() {
+			await hostRequest("world.agents.cancel", { request: { agentId: data.agentId } });
+		},
+	};
+}
+
+const WORLD_HANDLE = {
+	agents: {
+		async spawn(task: string | Record<string, unknown>): Promise<WorldAgentHandle> {
+			const request = typeof task === "string" ? { task } : task;
+			const data = (await hostRequest("world.agents.spawn", { request })) as WorldAgentHandleData;
+			return makeWorldAgentHandle(data);
+		},
+		async spawnMany(tasks: ReadonlyArray<string | Record<string, unknown>>): Promise<WorldAgentHandle[]> {
+			return Promise.all(tasks.map((task) => WORLD_HANDLE.agents.spawn(task)));
+		},
+	},
+	web: {
+		async search(query: string | Record<string, unknown>): Promise<Record<string, unknown>> {
+			const request = typeof query === "string" ? { query } : query;
+			return hostRequest("world.web.search", { request });
+		},
+	},
+};
+
 const RLM_HANDLE = {
 	hostRequest,
 	/**
@@ -378,6 +424,8 @@ function installBootstrapBindings(): void {
 	INTERNAL_BINDINGS.set("Bun", GUARDED_BUN);
 	namespace.tools = TOOLS_HANDLE;
 	INTERNAL_BINDINGS.set("tools", TOOLS_HANDLE);
+	namespace.world = WORLD_HANDLE;
+	INTERNAL_BINDINGS.set("world", WORLD_HANDLE);
 }
 
 installBootstrapBindings();
@@ -575,8 +623,15 @@ readline.on("line", (line) => {
 			const pending = pendingHostRequests.get(message.id);
 			if (!pending) break;
 			pendingHostRequests.delete(message.id);
-			if (message.status === "ok") pending.resolve(message.payload ?? {});
-			else pending.reject(new Error(message.error ?? "host request failed"));
+			if (message.status === "ok") {
+				pending.resolve(message.payload ?? {});
+			} else {
+				const error = new Error(message.error ?? "host request failed");
+				if (message.errorPayload) Object.assign(error, message.errorPayload);
+				// Structured fields must not be able to obscure the safe host message.
+				error.message = message.error ?? "host request failed";
+				pending.reject(error);
+			}
 			break;
 		}
 		case "snapshot": {
