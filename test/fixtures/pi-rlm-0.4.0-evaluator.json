@@ -1,0 +1,76 @@
+{
+	"baselineCommit": "70d45e6",
+	"executions": [
+		{
+			"status": "ok",
+			"stdout": "",
+			"stderr": "",
+			"result": "1"
+		},
+		{
+			"status": "ok",
+			"stdout": "",
+			"stderr": "",
+			"result": "3"
+		},
+		{
+			"status": "ok",
+			"stdout": "",
+			"stderr": "",
+			"result": "6"
+		},
+		{
+			"status": "ok",
+			"stdout": "stdout-proof\n",
+			"stderr": "stderr-proof\n",
+			"result": "{\n  counter: 3,\n}"
+		},
+		{
+			"status": "error",
+			"stdout": "",
+			"stderr": "",
+			"error": {
+				"name": "TypeError",
+				"message": "boom"
+			}
+		},
+		{
+			"status": "ok",
+			"stdout": "",
+			"stderr": "",
+			"result": "9"
+		}
+	],
+	"persistence": {
+		"before": {
+			"status": "ok",
+			"stdout": "",
+			"stderr": "",
+			"result": "{\n  count: 4,\n  nested: [ \"x\" ],\n}"
+		},
+		"snapshot": {
+			"saved": [
+				"plain"
+			],
+			"written": [
+				"plain"
+			],
+			"failed": [
+				"live"
+			]
+		},
+		"restore": {
+			"restored": [
+				"plain"
+			],
+			"deferred": [],
+			"failed": []
+		},
+		"after": {
+			"status": "ok",
+			"stdout": "",
+			"stderr": "",
+			"result": "{\n  plain: {\n    count: 4,\n    nested: [ \"x\" ],\n  },\n  live: \"undefined\",\n}"
+		}
+	}
+}

@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Layer, ManagedRuntime } from "effect";
+import { Layer, ManagedRuntime, Tracer } from "effect";
 import type { HostRequestHandlers } from "../engine/index.js";
 import { StaticAuthorityLive } from "../world/authority.js";
 import { createWorldHost } from "../world/bridge.js";
@@ -18,6 +18,8 @@ export interface SessionWorldOptions {
 	readonly getContext: () => ExtensionContext;
 	readonly spawnCommand?: (input: PiChildSpawnInput) => PiChildSpec;
 	readonly executeWeb?: CodexWebSearchExecutor;
+	/** Test/exporter seam; production uses Effect's configured tracer. */
+	readonly tracer?: Tracer.Tracer;
 }
 
 export interface SessionWorld {
@@ -58,6 +60,7 @@ export const createSessionWorld = (options: SessionWorldOptions): SessionWorld =
 				spawnCommand: options.spawnCommand,
 			}),
 			CodexConversionWebLive({ getContext: options.getContext, execute: options.executeWeb }),
+			...(options.tracer ? [Layer.succeed(Tracer.Tracer)(options.tracer)] : []),
 		),
 	);
 	return {

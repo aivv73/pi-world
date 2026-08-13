@@ -172,4 +172,5 @@ src/world/        experimental Effect-native runtime core
   runtime.ts      Layer composition and ManagedRuntime factory
   pi-process-agents.ts  session-scoped Pi child process adapter
   codex-conversion-web.ts  isolated pinned Codex web adapter
+  tracing.ts      privacy-safe semantic spans and in-memory test tracer
 ```

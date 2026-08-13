@@ -196,6 +196,24 @@ bootstrap overwrites any stale impostor restored under that name. Agent handles
 contain closures and are intentionally reported as unserialisable; persist a
 plain AgentId only, without treating it as a resumable execution.
 
+### World traces semantics, never payloads
+
+World service calls create stable Effect spans for the coordinator, web search,
+agent spawn, attempt, Pi process, wait, and cancel operations. Attempt and
+process observers are forked into the Agents Layer's explicit session scope, so
+their parent span is inherited across the fiber boundary and their lifetime is
+not cut short when admission returns. Shutdown settles processes before closing
+that observer scope.
+
+Tracing fields are an allowlist of scalar operation, depth, adapter, opaque
+agent/attempt identity, bounded timeout, process identity, stable error code,
+and outcome values. Task prompts, queries, credentials, command arguments,
+stdout/stderr, web results, raw errors, events, and links are never recorded.
+The deterministic in-memory tracer additionally replaces Effect's terminal
+Exit with a coarse status, so a failure Cause cannot become an accidental test
+export. Production can supply a normal Effect/OpenTelemetry tracer without
+changing World services.
+
 ### Codex web stays behind one pinned executor seam
 
 The experimental Web Layer imports only
@@ -266,5 +284,10 @@ terminal size.
 `test/session-world.test.ts` covers always-on extension activation, one World
 scope across evaluator generations, exact child extension loading, and awaited
 session-shutdown process cleanup.
+
+`test/world-tracing.test.ts` proves privacy-safe span parentage across the
+session-owned process fiber. `test/evaluator-comparison.test.ts` compares a
+normalized scripted transcript against a fixture recorded from pi-rlm 0.4.0 at
+`70d45e6`; durations, paths, and stack locations are the only normalized data.
 
 `bun run check` is the gate: typecheck, lint, and the full suite.

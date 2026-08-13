@@ -11,6 +11,7 @@ import type {
 	WorldOperation,
 	WorldSubject,
 } from "./domain.js";
+import { opaqueTraceId, WORLD_SPANS, withPrivacySafeSpan } from "./tracing.js";
 
 export type WorldDenied = Extract<WorldError, { readonly _tag: "WorldDenied" }>;
 export type AgentSpawnError = Extract<WorldError, { readonly _tag: "AgentSpawnError" }>;
@@ -46,30 +47,88 @@ export const authorize = (subject: WorldSubject, operation: WorldOperation) =>
 		yield* authority.check(subject, operation);
 	});
 
-export const spawnAgent = (subject: WorldSubject, request: AgentSpawnRequest) =>
-	Effect.gen(function* () {
-		yield* authorize(subject, "agents.spawn");
-		const agents = yield* Agents;
-		return yield* agents.spawn(request);
+const errorCode = (error: unknown) =>
+	typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
+		? error.code
+		: undefined;
+
+const traceEffect = <A, E, R>(name: string, effect: Effect.Effect<A, E, R>, attributes: Record<string, unknown>) =>
+	withPrivacySafeSpan(
+		name,
+		effect.pipe(
+			Effect.tap(() => Effect.annotateCurrentSpan("world.outcome", "succeeded")),
+			Effect.tapError((error) => {
+				const code = errorCode(error);
+				return Effect.annotateCurrentSpan({
+					"world.outcome": "failed",
+					...(code ? { "world.error_code": code } : {}),
+				});
+			}),
+		),
+		attributes,
+	);
+
+const tracedOperation = <A, E, R>(
+	subject: WorldSubject,
+	operation: WorldOperation,
+	name: string,
+	effect: Effect.Effect<A, E, R>,
+	attributes: Record<string, unknown> = {},
+) =>
+	traceEffect(WORLD_SPANS.coordinator, traceEffect(name, effect, attributes), {
+		"world.operation": operation,
+		"world.depth": subject.depth,
 	});
+
+export const spawnAgent = (subject: WorldSubject, request: AgentSpawnRequest) =>
+	tracedOperation(
+		subject,
+		"agents.spawn",
+		WORLD_SPANS.agentSpawn,
+		Effect.gen(function* () {
+			yield* authorize(subject, "agents.spawn");
+			const agents = yield* Agents;
+			return yield* agents.spawn(request);
+		}),
+	);
 
 export const waitForAgent = (subject: WorldSubject, request: AgentWaitRequest) =>
-	Effect.gen(function* () {
-		yield* authorize(subject, "agents.wait");
-		const agents = yield* Agents;
-		return yield* agents.wait(request);
-	});
+	tracedOperation(
+		subject,
+		"agents.wait",
+		WORLD_SPANS.agentWait,
+		Effect.gen(function* () {
+			yield* authorize(subject, "agents.wait");
+			const agents = yield* Agents;
+			return yield* agents.wait(request);
+		}),
+		{
+			"agent.id": opaqueTraceId(request.agentId),
+			...(request.timeoutMs === undefined ? {} : { "world.timeout_ms": request.timeoutMs }),
+		},
+	);
 
 export const cancelAgent = (subject: WorldSubject, agentId: AgentId) =>
-	Effect.gen(function* () {
-		yield* authorize(subject, "agents.cancel");
-		const agents = yield* Agents;
-		yield* agents.cancel(agentId);
-	});
+	tracedOperation(
+		subject,
+		"agents.cancel",
+		WORLD_SPANS.agentCancel,
+		Effect.gen(function* () {
+			yield* authorize(subject, "agents.cancel");
+			const agents = yield* Agents;
+			yield* agents.cancel(agentId);
+		}),
+		{ "agent.id": opaqueTraceId(agentId), "world.cancel_reason": "caller" },
+	);
 
 export const searchWeb = (subject: WorldSubject, request: WebSearchRequest) =>
-	Effect.gen(function* () {
-		yield* authorize(subject, "web.search");
-		const web = yield* Web;
-		return yield* web.search(request);
-	});
+	tracedOperation(
+		subject,
+		"web.search",
+		WORLD_SPANS.webSearch,
+		Effect.gen(function* () {
+			yield* authorize(subject, "web.search");
+			const web = yield* Web;
+			return yield* web.search(request);
+		}),
+	);

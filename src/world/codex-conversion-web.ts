@@ -40,21 +40,25 @@ export const makeCodexConversionWeb = (options: CodexConversionWebOptions): WebS
 		if (request.query.trim().length === 0) {
 			return Effect.fail(webSearchError("web search query must not be empty"));
 		}
-		return Effect.tryPromise({
-			try: async (signal) => {
-				const result = await (options.execute ?? executeCodexWebSearch)(
-					codexParams(request),
-					options.getContext(),
-					signal,
-					{
-						model: options.model,
-						customRustBinariesDir: options.customRustBinariesDir,
+		return Effect.annotateCurrentSpan("world.adapter", "codex-conversion").pipe(
+			Effect.andThen(
+				Effect.tryPromise({
+					try: async (signal) => {
+						const result = await (options.execute ?? executeCodexWebSearch)(
+							codexParams(request),
+							options.getContext(),
+							signal,
+							{
+								model: options.model,
+								customRustBinariesDir: options.customRustBinariesDir,
+							},
+						);
+						return Schema.decodeUnknownSync(WebResultSchema)(result);
 					},
-				);
-				return Schema.decodeUnknownSync(WebResultSchema)(result);
-			},
-			catch: (error) => webSearchError(error instanceof Error ? error.message : "Codex web search failed"),
-		});
+					catch: (error) => webSearchError(error instanceof Error ? error.message : "Codex web search failed"),
+				}),
+			),
+		);
 	},
 });
 

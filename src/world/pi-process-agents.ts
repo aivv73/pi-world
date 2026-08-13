@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { Effect, Layer } from "effect";
+import { Effect, Exit, Layer, Scope } from "effect";
 import {
 	type AgentHandleData,
 	type AgentResult,
@@ -18,6 +18,7 @@ import {
 	type AgentWaitError,
 	type AgentWaitTimeoutError,
 } from "./services.js";
+import { opaqueTraceId, WORLD_SPANS, withPrivacySafeSpan } from "./tracing.js";
 
 const DEFAULT_GRACE_MS = 250;
 const DEFAULT_MAX_OUTPUT_CHARS = 100_000;
@@ -42,6 +43,8 @@ export interface PiProcessAgentsOptions {
 	readonly graceMs?: number;
 	readonly maxOutputChars?: number;
 	readonly spawnCommand?: (input: PiChildSpawnInput) => PiChildSpec;
+	/** Internal session scope for attempt observer fibers. */
+	readonly processScope?: Scope.Scope;
 }
 
 export type PiProcessAgentEvent =
@@ -339,7 +342,29 @@ export const makePiProcessAgents = (options: PiProcessAgentsOptions): PiProcessA
 				if (request.timeoutMs !== undefined) {
 					record.executionTimer = setTimeout(() => requestTermination(record, true), request.timeoutMs);
 				}
-				return Effect.succeed(handle);
+				if (!options.processScope) return Effect.succeed(handle);
+				const processLifetime = withPrivacySafeSpan(
+					WORLD_SPANS.piProcess,
+					Effect.promise(() => record.completion).pipe(
+						Effect.tap((result) => Effect.annotateCurrentSpan("world.outcome", result._tag)),
+					),
+					{
+						"world.adapter": "pi-process",
+						"agent.id": opaqueTraceId(handle.agentId),
+						"attempt.id": opaqueTraceId(handle.attemptId),
+						...(child.pid === undefined ? {} : { "process.pid": child.pid }),
+					},
+				);
+				const attemptLifetime = withPrivacySafeSpan(
+					WORLD_SPANS.agentAttempt,
+					processLifetime.pipe(Effect.tap((result) => Effect.annotateCurrentSpan("world.outcome", result._tag))),
+					{
+						"world.adapter": "pi-process",
+						"agent.id": opaqueTraceId(handle.agentId),
+						"attempt.id": opaqueTraceId(handle.attemptId),
+					},
+				).pipe(Effect.asVoid);
+				return Effect.forkIn(attemptLifetime, options.processScope).pipe(Effect.as(handle));
 			}),
 		wait: (request: AgentWaitRequest) =>
 			Effect.suspend<AgentResult, AgentNotFoundError | AgentWaitTimeoutError | AgentWaitError, never>(() => {
@@ -389,9 +414,13 @@ export const PiProcessAgentsLive = (options: PiProcessAgentsOptions) =>
 	Layer.effect(
 		Agents,
 		Effect.acquireRelease(
-			Effect.sync(() => makePiProcessAgents(options)),
-			(agents) => agents.shutdown(),
-		),
+			Effect.gen(function* () {
+				const processScope = yield* Scope.make();
+				return { agents: makePiProcessAgents({ ...options, processScope }), processScope };
+			}),
+			({ agents, processScope }) =>
+				agents.shutdown().pipe(Effect.andThen(Scope.close(processScope, Exit.succeed(undefined)))),
+		).pipe(Effect.map(({ agents }) => agents)),
 	);
 
 type AgentRecordId = AgentHandleData["agentId"];

@@ -6,3 +6,4 @@ export * from "./pi-process-agents.js";
 export * from "./runtime.js";
 export * from "./services.js";
 export * from "./test-adapters.js";
+export * from "./tracing.js";
