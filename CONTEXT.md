@@ -44,6 +44,18 @@ _Avoid_: command response, process result
 The signed, reproducible evidence that one exact release and platform matrix satisfies every mandatory shell contract, adapter, evaluator, and live-agent scenario.
 _Avoid_: test run, release checklist
 
+**Containment Adapter**:
+A host-owned execution substrate that prevents descendants from escaping an execution owner and proves the complete process tree is terminated and reaped before a Host Shell result becomes terminal.
+_Avoid_: process group, best-effort cleanup
+
+**World Files**:
+The separately authorized World service for host and Virtual Environment file operations, including atomic handle-based transfers; it conveys no shell execution authority.
+_Avoid_: shell import, implicit mount
+
+**File Transfer Handle**:
+A live World Files handle whose exact ID can recover, await, or cancel one admitted atomic import or export without enumerating other transfers.
+_Avoid_: copy promise, shell handle
+
 **Command Profile**:
 A policy-owned Host Shell command identity binding a resolved executable to fixed arguments and argument, environment, working-directory, and resource constraints.
 _Avoid_: command name, executable path
