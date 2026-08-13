@@ -176,4 +176,5 @@ src/world/        experimental Effect-native runtime core
   bridge.ts       schema/authority boundary for the guest world facade
   runtime.ts      Layer composition and ManagedRuntime factory
   pi-process-agents.ts  session-scoped Pi child process adapter
+  codex-conversion-web.ts  isolated pinned Codex web adapter
 ```

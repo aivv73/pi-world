@@ -1,5 +1,6 @@
 export * from "./authority.js";
 export * from "./bridge.js";
+export * from "./codex-conversion-web.js";
 export * from "./domain.js";
 export * from "./pi-process-agents.js";
 export * from "./runtime.js";

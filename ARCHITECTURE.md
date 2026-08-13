@@ -186,6 +186,21 @@ bootstrap overwrites any stale impostor restored under that name. Agent handles
 contain closures and are intentionally reported as unserialisable; persist a
 plain AgentId only, without treating it as a resumable execution.
 
+### Codex web stays behind one pinned executor seam
+
+The experimental Web Layer imports only
+`@howaboua/pi-codex-conversion/dist/tools/web-run/tool.js` at the package's
+pinned 3.0.14 version. It delegates to `executeCodexWebSearch`, passing the
+live Pi `ExtensionContext` and Effect's abort signal. The package continues to
+own model selection, auth resolution, credential environment construction,
+bundled binary lookup, native process execution, and result parsing.
+
+This is deliberately a deep import, isolated in one module and protected by a
+contract test. The adapter maps only `WebSearchRequest` and `WebResult`; it
+does not register Codex's `web_run` ToolDefinition, copy provider code, or
+handle credentials. If the pinned seam disappears and those internals must be
+reimplemented, the spike stops rather than absorbing them.
+
 ### pi's tools are mounted behind the bridge, not registered with pi
 
 The session runs with pi's builtin tools disabled; the model's only tool is
