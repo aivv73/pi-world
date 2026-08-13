@@ -36,6 +36,10 @@ _Avoid_: user, caller identity
 An immutable, host-owned set of specific shell capabilities and policy profiles held by one Agent Principal and attenuated for descendants.
 _Avoid_: shell access, permissions object
 
+**Shell Terminal Result**:
+The versioned, immutable public record of one admitted shell execution's outcome, bounded output, cleanup, and side-effect disposition.
+_Avoid_: command response, process result
+
 **Command Profile**:
 A policy-owned Host Shell command identity binding a resolved executable to fixed arguments and argument, environment, working-directory, and resource constraints.
 _Avoid_: command name, executable path
