@@ -286,8 +286,13 @@ scope across evaluator generations, exact child extension loading, and awaited
 session-shutdown process cleanup.
 
 `test/world-tracing.test.ts` proves privacy-safe span parentage across the
-session-owned process fiber. `test/evaluator-comparison.test.ts` compares a
-normalized scripted transcript against a fixture recorded from pi-rlm 0.4.0 at
-`70d45e6`; durations, paths, and stack locations are the only normalized data.
+session-owned process fiber. `test/evaluator-comparison.test.ts` extracts the
+committed `70d45e6` pi-rlm engine archive and runs the same normalized script
+through that engine and this fork; durations, paths, and stack locations are the
+only normalized data.
 
-`bun run check` is the gate: typecheck, lint, and the full suite.
+The opt-in Linux certification with three genuine Pi children and the hidden
+Codex native web path is recorded in
+`docs/certification/world-spike-2026-08-13.md`; raw model sessions are deliberately
+not committed. `bun run check` is the deterministic gate: typecheck, lint, and
+the full suite.

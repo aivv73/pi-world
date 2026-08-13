@@ -8,8 +8,9 @@ files, running shell commands, editing, searching, delegating to subagents — i
 expressed as code inside that one tool.
 
 This fork preserves the pi-rlm evaluator while it grows an Effect-native World
-runtime. The design and acceptance evidence live in
-[`docs/research/pi-rlm-effect-v4-substrate.md`](docs/research/pi-rlm-effect-v4-substrate.md).
+runtime. The source-grounded design lives in
+[`docs/research/pi-rlm-effect-v4-substrate.md`](docs/research/pi-rlm-effect-v4-substrate.md); the completed Linux gate and opt-in three-child/Codex evidence is recorded in
+[`docs/certification/world-spike-2026-08-13.md`](docs/certification/world-spike-2026-08-13.md).
 
 ```
  ✓ rlm · shell · const files = (await Bun.$`ls -1`.text()).split("\n") · ↑ 2 ↓ 7 lines · 41ms
