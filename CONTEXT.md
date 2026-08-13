@@ -20,6 +20,10 @@ _Avoid_: installed commands, PATH
 A shell environment authorized to operate on the real project and invoke its native toolchain.
 _Avoid_: normal shell, system shell
 
+**Host Process Tree**:
+The root process and every descendant owned, monitored, and terminated as one contained Host Shell execution.
+_Avoid_: child process, command process
+
 **Host Script Profile**:
 A policy-owned, fixed interpreter configuration that gives every authorized Host Shell script an explicit dialect identity.
 _Avoid_: selected shell, default shell
