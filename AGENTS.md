@@ -46,3 +46,21 @@ the snapshot; anything unserialisable does not.
 - Extension code that needs pi's runtime is kept thin, with the logic extracted
   into a pure module beside it (`render-core.ts` next to `render.ts`).
 - Commit messages name the behaviour that changed and the reason, not the files.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked in GitHub Issues for aivv73/pi-world. See
+`docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The project uses the canonical `needs-triage`, `needs-info`,
+`ready-for-agent`, `ready-for-human`, and `wontfix` roles. See
+`docs/agents/triage-labels.md`.
+
+### Project knowledge
+
+This is a single-context project with a root glossary and locally scoped Linked
+Specs. See `docs/agents/domain.md`.
