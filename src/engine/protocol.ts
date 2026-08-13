@@ -1,7 +1,7 @@
 /**
  * Wire protocol between EngineManager (host) and the Bun guest process.
  *
- * Transport: line-delimited JSON on a dedicated pipe (fd 3), never on stdout.
+ * Transport: line-delimited JSON over a private loopback socket, never on stdout.
  *
  * Two properties make the channel trustworthy, and both are load-bearing:
  *
@@ -10,8 +10,8 @@
  *      channel would let ordinary output alter the engine's view of a cell.
  *   2. Authentication. Every envelope carries a nonce the host mints at spawn
  *      and the guest erases from its environment before running any cell. Code
- *      inside a cell cannot recover it, so even a deliberate write to fd 3
- *      cannot forge a message.
+ *      inside a cell cannot recover it, so a local socket connection cannot
+ *      forge a message.
  *
  * Together they make a cell unable to report its own outcome — it can only run.
  */
@@ -96,8 +96,8 @@ export type GuestToHostMessage = GuestToHost[keyof GuestToHost];
 export const ENVELOPE_KEY = "__rlm";
 /** Env var carrying the per-process nonce to the guest. */
 export const NONCE_ENV = "PI_RLM_NONCE";
-/** Protocol pipe: guest → host. */
-export const PROTOCOL_FD = 3;
+/** Env var carrying the host-owned loopback listener port to the guest. */
+export const PROTOCOL_PORT_ENV = "PI_RLM_PROTOCOL_PORT";
 
 export function encodeMessage(message: HostToGuestMessage | GuestToHostMessage, nonce?: string): string {
 	const envelope: Record<string, unknown> = { [ENVELOPE_KEY]: 1, ...message };

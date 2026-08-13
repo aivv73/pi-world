@@ -137,8 +137,8 @@ code-execution input: importing a package runs its code. Dynamic
 The extension runs a Bun child process that owns the namespace. Cells are
 transformed so their top-level declarations become namespace assignments, then
 executed inside a `with` block over a proxy. Host and guest talk over a private
-pipe with authenticated framing, which is what stops a cell from being able to
-report its own outcome.
+loopback connection with authenticated framing, which is what stops a cell from
+being able to report its own outcome.
 
 [ARCHITECTURE.md](ARCHITECTURE.md) covers the evaluator design and reasoning. The
 [Effect v4 substrate note](docs/research/pi-rlm-effect-v4-substrate.md) records the

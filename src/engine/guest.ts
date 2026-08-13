@@ -10,8 +10,8 @@
  * It also tags output with the cell that produced it, serves snapshot,
  * restore, and listing requests, and forwards host requests made from cells.
  *
- * Protocol traffic leaves on fd 3 and carries a nonce, so cell output can be
- * neither mistaken for nor forged into a protocol message.
+ * Protocol traffic leaves on a private loopback socket and carries a nonce, so
+ * cell output can be neither mistaken for nor forged into a protocol message.
  *
  * Runs as: bun guest.ts   (spawned by EngineManager)
  */
@@ -19,6 +19,7 @@
 import { deserialize, serialize } from "bun:jsc";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { writeSync } from "node:fs";
+import { createConnection } from "node:net";
 import { createInterface } from "node:readline";
 import { format } from "node:util";
 import { importNpm } from "./npm.js";
@@ -28,18 +29,20 @@ import {
 	type GuestToHostMessage,
 	type HostToGuestMessage,
 	NONCE_ENV,
-	PROTOCOL_FD,
+	PROTOCOL_PORT_ENV,
 } from "./protocol.js";
 import { transformCell } from "./transform.js";
 
 // ── identity: nonce + unguessable internal names ─────────────────────────────
-// The nonce is removed from the environment immediately so cell code cannot
-// read it back and forge protocol traffic on fd 3.
+// Transport details are removed from the environment immediately so cell code
+// cannot recover the nonce or connect to the protocol listener.
 
 const NONCE = process.env[NONCE_ENV] ?? "";
+const protocolPort = Number(process.env[PROTOCOL_PORT_ENV]);
 delete process.env[NONCE_ENV];
-if (!NONCE) {
-	writeSync(2, "pi-rlm guest started without a protocol nonce\n");
+delete process.env[PROTOCOL_PORT_ENV];
+if (!NONCE || !Number.isInteger(protocolPort) || protocolPort < 1 || protocolPort > 65535) {
+	writeSync(2, "pi-world guest started without valid protocol transport details\n");
 	process.exit(2);
 }
 
@@ -47,40 +50,28 @@ const SCOPE_NAME = `__rlm_scope_${NONCE}`;
 const CTX_NAME = `__rlm_ctx_${NONCE}`;
 const INTERNAL_NAMES = new Set([SCOPE_NAME, CTX_NAME]);
 
-// A pipe fd can be non-blocking: writeSync may write partially or throw EAGAIN
-// when the host has not drained yet. Loop until the whole frame is out, or a
-// half-written line would corrupt the protocol stream.
-const backoff = new Int32Array(new SharedArrayBuffer(4));
+const protocolSocket = createConnection({ host: "127.0.0.1", port: protocolPort });
+protocolSocket.setNoDelay(true);
 
-function writeAllSync(fd: number, text: string): void {
-	const buffer = Buffer.from(text, "utf8");
-	let offset = 0;
-	while (offset < buffer.length) {
-		try {
-			offset += writeSync(fd, buffer, offset, buffer.length - offset);
-		} catch (error) {
-			const code = (error as NodeJS.ErrnoException).code;
-			if (code === "EAGAIN" || code === "EWOULDBLOCK") {
-				Atomics.wait(backoff, 0, 0, 1);
-				continue;
-			}
-			if (code === "EPIPE" || code === "ERR_STREAM_DESTROYED") {
-				try {
-					writeSync(2, "[guest] protocol pipe closed; exiting\n");
-				} catch {}
-				// The host closed the protocol pipe (killed or disposed this engine).
-				// Nothing left to report to; exit quietly instead of crashing with an
-				// uncaught error the host would surface as a spurious failure.
-				process.exit(0);
-			}
-			throw error;
-		}
-	}
-}
+await new Promise<void>((resolve, reject) => {
+	protocolSocket.once("connect", resolve);
+	protocolSocket.once("error", reject);
+});
 
+// Socket writes preserve call order and copy each frame into Node/Bun's stream
+// queue. Unlike Bun's extra child-process stdio pipes, loopback sockets survive
+// repeated guest teardown without poisoning the next spawn.
 function send(message: GuestToHostMessage): void {
-	writeAllSync(PROTOCOL_FD, encodeMessage(message, NONCE));
+	if (protocolSocket.destroyed) return;
+	protocolSocket.write(encodeMessage(message, NONCE));
 }
+
+protocolSocket.on("error", () => {
+	process.exitCode = 1;
+});
+protocolSocket.on("close", () => {
+	process.exit();
+});
 
 // ── namespace, cell context ──────────────────────────────────────────────────
 

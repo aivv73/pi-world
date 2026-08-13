@@ -398,15 +398,21 @@ describe("lifecycle", () => {
 		await expect(m.execute("2+2")).rejects.toThrow(/shut down/i);
 	});
 
+	// The suite itself runs under Bun, the combination that used to poison Bun's
+	// extra-stdio spawn machinery after a killed fd-3 guest. Repeated real guest
+	// cycles pin the affected official runner before the production-Node probe.
+	test("repeated Bun-host lifecycles keep admitting real guests", async () => {
+		for (let i = 0; i < 12; i++) {
+			const m = engine();
+			expect((await m.execute(`${i} + 1`)).status).toBe("ok");
+			await m.kill();
+		}
+	}, 30_000);
+
 	// A long session cycles engines (wedge recovery, reloads); one leaked
 	// descriptor per lifecycle is a slow death by EMFILE, invisible to every
-	// single-engine test. The guarantee is measured under Node because that is
-	// the production host: pi runs the engine in Node, where a SIGKILL'd
-	// child's stdio is reclaimed cleanly. Bun — this suite's runtime — leaks
-	// one descriptor per killed child and cannot close its ends of the pipes
-	// without corrupting its own spawn machinery (any close poisons later
-	// 4-pipe spawns with "Failed to connect ENOENT"), so measuring here would
-	// test the harness, not the engine.
+	// single-engine test. Measure under Node too because that is the production
+	// pi host, while every guest remains the real Bun evaluator.
 	test("an engine lifecycle returns every descriptor it borrowed (under Node, the production host)", async () => {
 		const dir = tempDir();
 		const engineDir = fileURLToPath(new URL("../src/engine/", import.meta.url));
@@ -922,6 +928,45 @@ describe("snapshot/restore", () => {
 		const restore = await m2.restoreState();
 		expect(restore?.restored).toContain("autoSaved");
 		expect((await m2.execute("autoSaved")).result).toContain("314");
+	});
+
+	test("a snapshot requested during a cell waits for its completed namespace", async () => {
+		// A suspended cell has already made incremental writes, but durability is
+		// committed only after that cell settles; otherwise restore can revive a
+		// state the caller never observed as a completed execution.
+		const snapshot = { path: join(tempDir(), "ns.snapshot"), debounceMs: 600_000 };
+		const m1 = engine({ snapshot });
+		const running = m1.execute(
+			"let snapshotPhase = 1; await new Promise((r) => setTimeout(r, 300)); snapshotPhase = 2;",
+		);
+		await new Promise((r) => setTimeout(r, 100));
+		const requestedWhileRunning = m1.snapshotState();
+		expect((await running).status).toBe("ok");
+		await requestedWhileRunning;
+		await m1.kill();
+
+		const m2 = engine({ snapshot });
+		await m2.start();
+		await m2.restoreState();
+		expect((await m2.execute("snapshotPhase")).result).toBe("2");
+	});
+
+	test("a restore requested during a cell waits and then replaces the completed namespace", async () => {
+		const snapshot = { path: join(tempDir(), "ns.snapshot"), debounceMs: 600_000 };
+		const seed = engine({ snapshot });
+		await seed.execute('let restorePhase = "saved";');
+		await seed.snapshotState();
+		await seed.kill();
+
+		const m = engine({ snapshot });
+		const running = m.execute(
+			'restorePhase = "running"; await new Promise((r) => setTimeout(r, 300)); restorePhase = "finished";',
+		);
+		await new Promise((r) => setTimeout(r, 100));
+		const restore = m.restoreState();
+		expect((await running).status).toBe("ok");
+		expect((await restore)?.restored).toContain("restorePhase");
+		expect((await m.execute("restorePhase")).result).toContain("saved");
 	});
 });
 

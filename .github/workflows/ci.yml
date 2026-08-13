@@ -8,23 +8,17 @@ on:
 
 jobs:
   check:
-    # macOS, not ubuntu: the suite's host process is Bun (bun test), and Bun on
-    # Linux cannot spawn a child with an extra stdio pipe on fd 3 — the guest's
-    # protocol channel — failing with "Failed to connect ENOENT" in
-    # #createStdioObject. Production is unaffected (pi runs the host under Node,
-    # which handles extra fds); the broken combination is exactly the test
-    # runner. Move back to ubuntu when Bun fixes extra-fd spawn on Linux.
-    runs-on: macos-latest
+    # Linux is the affected Bun-host runner pinned by the real lifecycle
+    # contracts. The evaluator protocol uses loopback TCP rather than Bun's
+    # unstable extra child-process stdio descriptors.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      # pi's grep/find tools shell out to ripgrep and download it on demand
-      # when missing. That download comes from the GitHub releases API, which
-      # rate-limits anonymous runners — a flaky 403 turns into a red suite.
-      # Preinstalling removes the network dependency entirely.
-      - run: brew install ripgrep fd
+      # Avoid pi tool fallback downloads from GitHub's anonymous API.
+      - run: sudo apt-get update && sudo apt-get install -y ripgrep fd-find && sudo ln -sf /usr/bin/fdfind /usr/local/bin/fd
       - run: bun install --frozen-lockfile
       - name: Typecheck, lint, and test
         run: bun run check

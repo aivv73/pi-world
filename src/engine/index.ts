@@ -16,7 +16,18 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	closeSync,
+	existsSync,
+	fsyncSync,
+	mkdirSync,
+	openSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
+import { createServer, type Server, type Socket } from "node:net";
 import { dirname } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -26,12 +37,13 @@ import {
 	type GuestToHostMessage,
 	type HostToGuestMessage,
 	NONCE_ENV,
-	PROTOCOL_FD,
+	PROTOCOL_PORT_ENV,
 } from "./protocol.js";
 
 const GUEST_PATH = fileURLToPath(new URL("./guest.ts", import.meta.url));
 const DEFAULT_MAX_OUTPUT_CHARS = 65536;
 const READY_TIMEOUT_MS = 10_000;
+const PROTOCOL_HANDSHAKE_TIMEOUT_MS = 2_000;
 const ABORT_GRACE_MS = 500;
 const PING_TIMEOUT_MS = 5_000;
 const DEFAULT_SNAPSHOT_DEBOUNCE_MS = 1500;
@@ -229,8 +241,12 @@ export class EngineManager {
 	private guestStderr = "";
 	/** Resolves when the child and all of its stdio have fully closed. */
 	private childClosed?: Promise<void>;
-	/** Held so the protocol reader is not garbage-collected mid-session, which
-	 * would close the guest's write end and kill it with EPIPE. */
+	/** The listener exists only until one nonce-authenticated guest connects. */
+	private protocolServer?: Server;
+	private protocolServerClosed?: Promise<void>;
+	private protocolSocket?: Socket;
+	private readonly protocolCandidates = new Set<Socket>();
+	/** Held so the authenticated socket reader stays live for the engine generation. */
 	private protocolReader?: ReturnType<typeof createInterface>;
 	/** Abort + source per cell, retained past settlement for late bridge calls. */
 	private readonly cellRecords = new Map<string, { hostAbort: AbortController; code: string }>();
@@ -267,94 +283,173 @@ export class EngineManager {
 		this.state = "starting";
 		installProcessCleanupOnce();
 		liveEngines.add(this);
-		const child = spawn("bun", ["run", GUEST_PATH], {
-			cwd: this.options.cwd,
-			env: {
-				...process.env,
-				...(this.options.env ?? {}),
-				[NONCE_ENV]: this.nonce,
-			},
-			// fd 3 carries protocol traffic so stdout/stderr stay pure user output.
-			stdio: ["pipe", "pipe", "pipe", "pipe"],
-		});
-		this.child = child;
-		this.childClosed = new Promise((resolve) => child.once("close", () => resolve()));
 
-		const ready = new Promise<void>((resolve, reject) => {
-			const timer = setTimeout(() => reject(new Error("Engine guest did not become ready in time")), READY_TIMEOUT_MS);
-			timer.unref?.();
-			this.pendingRequests.set("__ready__", {
-				resolve: () => {
-					clearTimeout(timer);
-					resolve();
-				},
-				reject: (error) => {
-					clearTimeout(timer);
+		const server = createServer((socket) => this.acceptProtocolCandidate(server, socket));
+		this.protocolServer = server;
+		this.protocolServerClosed = new Promise((resolve) => server.once("close", resolve));
+
+		try {
+			const port = await new Promise<number>((resolve, reject) => {
+				const onClose = () => {
+					server.off("error", onError);
+					server.off("listening", onListening);
+					reject(new Error("Engine protocol listener closed during startup"));
+				};
+				const onError = (error: Error) => {
+					server.off("close", onClose);
+					server.off("listening", onListening);
 					reject(error);
-				},
+				};
+				const onListening = () => {
+					server.off("close", onClose);
+					server.off("error", onError);
+					const address = server.address();
+					if (!address || typeof address === "string") reject(new Error("Engine protocol listener has no TCP port"));
+					else resolve(address.port);
+				};
+				server.once("close", onClose);
+				server.once("error", onError);
+				server.once("listening", onListening);
+				server.listen(0, "127.0.0.1");
 			});
-		});
+			server.unref();
+			if ((this.state as string) === "shutdown") throw new Error("Engine has been shut down");
 
-		const protocolStream = child.stdio[PROTOCOL_FD] as NodeJS.ReadableStream | null;
-		if (!protocolStream) {
-			throw new Error("Engine guest was spawned without a protocol pipe on fd 3");
+			const ready = new Promise<void>((resolve, reject) => {
+				const timer = setTimeout(
+					() => reject(new Error("Engine guest did not become ready in time")),
+					READY_TIMEOUT_MS,
+				);
+				timer.unref?.();
+				this.pendingRequests.set("__ready__", {
+					resolve: () => {
+						clearTimeout(timer);
+						resolve();
+					},
+					reject: (error) => {
+						clearTimeout(timer);
+						reject(error);
+					},
+				});
+			});
+
+			const child = spawn("bun", ["run", GUEST_PATH], {
+				cwd: this.options.cwd,
+				env: {
+					...process.env,
+					...(this.options.env ?? {}),
+					[NONCE_ENV]: this.nonce,
+					[PROTOCOL_PORT_ENV]: String(port),
+				},
+				// Protocol traffic has its own loopback socket; these pipes are only
+				// commands and user subprocess output.
+				stdio: ["pipe", "pipe", "pipe"],
+			});
+			this.child = child;
+			this.childClosed = new Promise((resolve) => child.once("close", () => resolve()));
+
+			child.stdout!.on("data", (buffer: Buffer) => this.appendActiveOutput("stdout", buffer.toString()));
+			child.stderr!.on("data", (buffer: Buffer) => {
+				const text = buffer.toString();
+				this.guestStderr = (this.guestStderr + text).slice(-4000);
+				this.appendActiveOutput("stderr", text);
+			});
+			child.stdin?.on("error", () => {});
+
+			child.on("error", (error) => {
+				const message =
+					(error as NodeJS.ErrnoException).code === "ENOENT"
+						? "Engine process failed: 'bun' was not found on PATH. pi-world runs its evaluator in Bun; install it from https://bun.sh and restart pi."
+						: `Engine process failed: ${error.message}`;
+				this.failAllPending(new Error(message));
+				this.transitionToShutdown(message);
+			});
+			child.on("exit", (code, signal) => {
+				if (this.child !== child) return;
+				if (this.state !== "shutdown") {
+					const tail = this.guestStderr.trim();
+					const reason =
+						`Engine process exited unexpectedly (code=${code} signal=${signal})` +
+						(tail ? `\nguest stderr:\n${tail.slice(-1500)}` : "");
+					this.failAllPending(new Error(reason));
+					this.transitionToShutdown(reason);
+				}
+			});
+
+			await ready;
+			if ((this.state as string) === "shutdown") throw new Error("Engine has been shut down");
+			this.state = "running";
+		} catch (error) {
+			const teardownAlreadyOwned = (this.state as string) === "shutdown";
+			const childClosed = this.childClosed;
+			const serverClosed = this.protocolServerClosed;
+			this.killSync();
+			if (!teardownAlreadyOwned) await this.awaitTeardown(childClosed, serverClosed);
+			throw error;
 		}
-		this.protocolReader = createInterface({ input: protocolStream });
-		this.protocolReader.on("line", (line) => this.handleGuestLine(line));
-		// Anything the guest writes to the real stdout/stderr fds is subprocess
-		// output (Bun.$ without .quiet()); attribute it to the running cell.
-		child.stdout!.on("data", (buffer: Buffer) => this.appendActiveOutput("stdout", buffer.toString()));
-		child.stderr!.on("data", (buffer: Buffer) => {
-			const text = buffer.toString();
-			this.guestStderr = (this.guestStderr + text).slice(-4000);
-			this.appendActiveOutput("stderr", text);
-		});
+	}
 
-		child.on("error", (error) => {
-			// pi runs on Node, but the evaluator is a Bun process. When bun is not
-			// installed the raw ENOENT names a file nobody went looking for, so say
-			// what is actually missing and how to get it.
-			const message =
-				(error as NodeJS.ErrnoException).code === "ENOENT"
-					? "Engine process failed: 'bun' was not found on PATH. pi-rlm runs its evaluator in Bun; install it from https://bun.sh and restart pi."
-					: `Engine process failed: ${error.message}`;
-			this.failAllPending(new Error(message));
-			this.transitionToShutdown(message);
-		});
-		child.on("exit", (code, signal) => {
-			// A killed child's exit event arrives after teardown has already moved
-			// on. Acting on it would reject an execution nobody is waiting for any
-			// more, surfacing as an unhandled rejection in an unrelated context.
-			if (this.child !== child) return;
-			if (this.state !== "shutdown") {
-				const tail = this.guestStderr.trim();
-				const reason =
-					`Engine process exited unexpectedly (code=${code} signal=${signal})` +
-					(tail ? `\nguest stderr:\n${tail.slice(-1500)}` : "");
-				this.failAllPending(new Error(reason));
-				this.transitionToShutdown(reason);
+	private acceptProtocolCandidate(server: Server, socket: Socket): void {
+		if (this.state === "shutdown" || server !== this.protocolServer) {
+			socket.destroy();
+			return;
+		}
+		this.protocolCandidates.add(socket);
+		socket.setNoDelay(true);
+		const reader = createInterface({ input: socket });
+		let authenticated = false;
+		const timer = setTimeout(() => socket.destroy(), PROTOCOL_HANDSHAKE_TIMEOUT_MS);
+		timer.unref?.();
+
+		reader.on("line", (line) => {
+			if (authenticated) {
+				this.handleGuestLine(line);
+				return;
 			}
+			const message = decodeMessage<GuestToHostMessage>(line, this.nonce);
+			if (!message || message.type !== "ready" || this.protocolSocket) {
+				socket.destroy();
+				return;
+			}
+			authenticated = true;
+			clearTimeout(timer);
+			this.protocolCandidates.delete(socket);
+			this.protocolSocket = socket;
+			this.protocolReader = reader;
+			for (const candidate of this.protocolCandidates) candidate.destroy();
+			this.protocolCandidates.clear();
+			server.close();
+			this.handleGuestLine(line);
 		});
+		socket.on("error", () => {});
+		socket.on("close", () => {
+			clearTimeout(timer);
+			this.protocolCandidates.delete(socket);
+			if (!authenticated || this.state === "shutdown" || this.protocolSocket !== socket) return;
+			const reason = "Engine guest protocol connection closed unexpectedly";
+			this.failAllPending(new Error(reason));
+			this.transitionToShutdown(reason);
+			this.child?.kill("SIGKILL");
+		});
+	}
 
-		await ready;
-		// Being torn down while starting wins: without this the late assignment
-		// resurrects a killed engine as "running", and the child's own exit event
-		// then reads that as an unexpected death.
-		if ((this.state as string) === "shutdown") throw new Error("Engine has been shut down");
-		this.state = "running";
+	private async awaitTeardown(childClosed?: Promise<void>, serverClosed?: Promise<void>): Promise<void> {
+		const closed = Promise.all([childClosed, serverClosed].filter((item): item is Promise<void> => Boolean(item)));
+		await Promise.race([closed, new Promise<void>((resolve) => setTimeout(resolve, 2_000).unref?.())]);
 	}
 
 	private transitionToShutdown(reason: string): void {
 		this.state = "shutdown";
+		liveEngines.delete(this);
 		this.clearSnapshotTimer();
 		const active = this.activeExecution;
 		if (active && !active.settled) {
 			this.activeExecution = undefined;
 			active.settled = true;
+			active.hostAbort.abort();
 			active.reject(new Error(reason));
 		}
 	}
-
 	private failAllPending(error: Error): void {
 		for (const [, pending] of this.pendingRequests) {
 			if (pending.timer) clearTimeout(pending.timer);
@@ -364,16 +459,13 @@ export class EngineManager {
 	}
 
 	async kill(): Promise<void> {
-		const closed = this.childClosed;
+		const childClosed = this.childClosed;
+		const serverClosed = this.protocolServerClosed;
 		this.killSync();
-		// Teardown is not done until the child's stdio is actually closed. A
-		// SIGKILL'd child's pipes are torn down asynchronously, and a spawn that
-		// follows too quickly recycles those descriptors while the teardown is
-		// still in flight - which can close a pipe belonging to the new engine.
-		// Observed as a fresh guest hitting EPIPE on its first protocol write.
-		if (closed) {
-			await Promise.race([closed, new Promise<void>((resolve) => setTimeout(resolve, 2000).unref?.())]);
-		}
+		// A lifecycle is complete only after the guest pipes and the loopback
+		// listener/socket have closed; otherwise a rapid rebuild can inherit the
+		// previous generation's teardown.
+		await this.awaitTeardown(childClosed, serverClosed);
 	}
 
 	/** Synchronous teardown, safe from process.on("exit"). */
@@ -387,12 +479,21 @@ export class EngineManager {
 		this.state = "shutdown";
 		liveEngines.delete(this);
 		this.failAllPending(new Error("Engine has been shut down"));
-		this.child?.kill("SIGKILL");
-		this.child = undefined;
+
 		this.protocolReader?.close();
 		this.protocolReader = undefined;
-	}
+		this.protocolSocket?.destroy();
+		this.protocolSocket = undefined;
+		for (const socket of this.protocolCandidates) socket.destroy();
+		this.protocolCandidates.clear();
+		try {
+			this.protocolServer?.close();
+		} catch {}
+		this.protocolServer = undefined;
 
+		this.child?.kill("SIGKILL");
+		this.child = undefined;
+	}
 	/** Graceful cleanup: flush a final snapshot, then terminate the guest. */
 	async dispose(): Promise<void> {
 		if (this.state === "running") {
@@ -716,34 +817,81 @@ export class EngineManager {
 	// ── snapshot / restore / names ─────────────────────────────────────────────
 
 	async snapshotState(): Promise<SnapshotResult | null> {
-		const config = this.options.snapshot;
-		if (!config || this.state !== "running") return null;
+		// Snapshots share the execution slot. A timer firing while a cell is
+		// suspended must not persist that cell's half-written namespace.
+		const previous = this.executionQueue;
+		let release: () => void = () => {};
+		this.executionQueue = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		await previous;
+
 		try {
+			const config = this.options.snapshot;
+			if (!config || this.state !== "running") return null;
 			const reply = await this.request({ type: "snapshot", id: randomUUID() }, SNAPSHOT_REQUEST_TIMEOUT_MS);
 			if (reply.type !== "snapshot_result") return null;
-			mkdirSync(dirname(config.path), { recursive: true });
-			writeFileSync(
-				config.path,
-				JSON.stringify({
-					version: 2,
-					vars: reply.vars,
-					meta: reply.meta,
-					cellSeq: reply.cellSeq,
-					failed: reply.failed,
-				}),
-			);
+			const contents = JSON.stringify({
+				version: 2,
+				vars: reply.vars,
+				meta: reply.meta,
+				cellSeq: reply.cellSeq,
+				failed: reply.failed,
+			});
+			this.writeSnapshotAtomically(config.path, contents);
 			return { path: config.path, saved: Object.keys(reply.vars), written: reply.written, failed: reply.failed };
 		} catch {
 			return null;
+		} finally {
+			release();
+		}
+	}
+
+	private writeSnapshotAtomically(path: string, contents: string): void {
+		mkdirSync(dirname(path), { recursive: true });
+		const temporary = `${path}.tmp-${process.pid}-${randomUUID()}`;
+		let fd: number | undefined;
+		try {
+			fd = openSync(temporary, "wx", 0o600);
+			writeFileSync(fd, contents, "utf8");
+			fsyncSync(fd);
+			closeSync(fd);
+			fd = undefined;
+			renameSync(temporary, path);
+			// The file fsync makes its contents durable; syncing the directory makes
+			// the rename durable too. Some platforms cannot open directories, so
+			// retain atomic replacement there without pretending to stronger crash guarantees.
+			let directoryFd: number | undefined;
+			try {
+				directoryFd = openSync(dirname(path), "r");
+				fsyncSync(directoryFd);
+			} catch {
+				// Atomic rename is still the safe fallback.
+			} finally {
+				if (directoryFd !== undefined) closeSync(directoryFd);
+			}
+		} catch (error) {
+			if (fd !== undefined) closeSync(fd);
+			rmSync(temporary, { force: true });
+			throw error;
 		}
 	}
 
 	async restoreState(): Promise<RestoreResult | null> {
 		const config = this.options.snapshot;
-		if (!config) return null;
-		if (!existsSync(config.path)) return null;
-		await this.start();
+		if (!config || !existsSync(config.path)) return null;
+
+		// Restore mutates the same namespace as a cell, so it participates in the
+		// same submission-order slot rather than racing a suspended execution.
+		const previous = this.executionQueue;
+		let release: () => void = () => {};
+		this.executionQueue = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		await previous;
+
 		try {
+			await this.start();
 			const payload = JSON.parse(readFileSync(config.path, "utf8")) as {
 				vars?: Record<string, string>;
 				meta?: Record<string, { touchedAt: number }>;
@@ -769,6 +917,8 @@ export class EngineManager {
 			return { path: config.path, restored: reply.restored, deferred: reply.deferred, failed: reply.failed };
 		} catch {
 			return null;
+		} finally {
+			release();
 		}
 	}
 

@@ -10,7 +10,7 @@ pi
      ├─ SessionWorldOwner one ManagedRuntime and Agents scope per session
      └─ EngineManager     replaceable evaluator generation, queue, snapshots
          │  stdin   ──▶   commands
-         │  fd 3    ◀──   protocol: results, output, host requests
+         │ loopback ◀──   protocol: results, output, host requests
          │  stdout  ◀──   subprocess output only
          └─ guest (bun)   namespace, cell execution, host bridge
 ```
@@ -102,9 +102,10 @@ brings the last snapshot back. Losing the process should not mean losing work.
 
 Two properties, both load-bearing:
 
-*Separation.* Protocol traffic uses a dedicated pipe (fd 3). The guest's stdout
-and stderr carry only user output, so a cell printing JSON is just a cell
-printing JSON.
+*Separation.* Protocol traffic uses a per-engine loopback TCP connection. The
+guest's stdout and stderr carry only user output, so a cell printing JSON is just
+a cell printing JSON. The host listens before spawning, authenticates the first
+`ready` frame, then closes the listener; teardown awaits both process and socket.
 
 *Authentication.* Every frame carries a nonce the host mints at spawn and the
 guest erases from its environment before running any cell. Code inside a cell
