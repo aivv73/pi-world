@@ -1,11 +1,15 @@
-# pi-rlm
+# pi-world
 
-A [pi](https://pi.dev) extension that replaces the usual toolbox with a single
+An experimental [pi](https://pi.dev) extension that replaces the usual toolbox with a single
 tool: **`execute`**, which runs TypeScript in a persistent Bun evaluator.
 
 Everything an agent would normally reach for a separate tool to do — reading
 files, running shell commands, editing, searching, delegating to subagents — is
 expressed as code inside that one tool.
+
+This fork preserves the pi-rlm evaluator while it grows an Effect-native World
+runtime. The design and acceptance evidence live in
+[`docs/research/pi-rlm-effect-v4-substrate.md`](docs/research/pi-rlm-effect-v4-substrate.md).
 
 ```
  ✓ rlm · shell · const files = (await Bun.$`ls -1`.text()).split("\n") · ↑ 2 ↓ 7 lines · 41ms
@@ -59,7 +63,7 @@ namespace intact, and the cancelled cell cannot keep writing to it afterwards.
 ## Install
 
 ```bash
-pi install npm:@shift-labs/pi-rlm
+pi install npm:@aivv/pi-world
 ```
 
 **[Bun](https://bun.sh) is required.** pi itself runs on Node, but the evaluator
@@ -71,8 +75,9 @@ curl -fsSL https://bun.sh/install | bash
 
 ## Launch
 
-The extension is dormant until asked for. A plain `pi` session is untouched —
-default prompt, default tools, no evaluator. Activation is one flag:
+The baseline keeps pi-rlm's explicit activation flag while the always-on World
+runtime is wired in. A plain `pi` session is untouched until that integration
+lands; activation is one flag:
 
 ```bash
 pi --rlm
@@ -90,7 +95,7 @@ To run from a clone (development), load the extension explicitly — the flag
 works the same, or set `PI_RLM_FORCE=1` where flag plumbing is awkward:
 
 ```bash
-git clone https://github.com/shift-labs-ai/pi-rlm && cd pi-rlm
+git clone https://github.com/aivv73/pi-world && cd pi-world
 bun install
 pi --rlm -e ./src/extension/index.ts
 ```
@@ -132,7 +137,9 @@ executed inside a `with` block over a proxy. Host and guest talk over a private
 pipe with authenticated framing, which is what stops a cell from being able to
 report its own outcome.
 
-[ARCHITECTURE.md](ARCHITECTURE.md) covers the design and the reasoning behind it.
+[ARCHITECTURE.md](ARCHITECTURE.md) covers the evaluator design and reasoning. The
+[Effect v4 substrate note](docs/research/pi-rlm-effect-v4-substrate.md) records the
+World spike's source-grounded design and stop conditions.
 
 ## Development
 
@@ -145,7 +152,8 @@ bun run format     # biome
 
 The test suite is the specification. `test/engine.contract.test.ts` states each
 guarantee the evaluator makes and why it exists; read it before changing engine
-behaviour, and never weaken a case to make a change pass.
+behaviour, and never weaken a case to make a change pass. The `PI_RLM_*` variables
+and `.pi-rlm/` session directory remain compatibility surfaces for this fork.
 
 ## Layout
 
@@ -162,4 +170,9 @@ src/extension/   the pi integration
   subagents.ts   spawning, registry, file-based results
   render-core.ts cell layout (pure)
   render.ts      binds pi's theme and width primitives to it
+src/world/        experimental Effect-native runtime core
+  domain.ts       IDs, schemas, terminal results, and safe errors
+  services.ts     Authority, Agents, and Web contracts
+  runtime.ts      Layer composition and ManagedRuntime factory
+  pi-process-agents.ts  session-scoped Pi child process adapter
 ```

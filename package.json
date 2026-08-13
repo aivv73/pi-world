@@ -1,8 +1,8 @@
 {
-	"name": "@shift-labs/pi-rlm",
+	"name": "@aivv/pi-world",
 	"version": "0.4.0",
 	"type": "module",
-	"description": "A pi extension with a single tool: execute, running TypeScript in a persistent Bun evaluator",
+	"description": "An experimental pi extension with a single tool: execute, running TypeScript in a persistent Bun evaluator",
 	"keywords": [
 		"pi-package",
 		"pi",
@@ -14,11 +14,11 @@
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/shift-labs-ai/pi-rlm.git"
+		"url": "git+https://github.com/aivv73/pi-world.git"
 	},
-	"homepage": "https://github.com/shift-labs-ai/pi-rlm#readme",
+	"homepage": "https://github.com/aivv73/pi-world#readme",
 	"bugs": {
-		"url": "https://github.com/shift-labs-ai/pi-rlm/issues"
+		"url": "https://github.com/aivv73/pi-world/issues"
 	},
 	"pi": {
 		"extensions": [
@@ -29,6 +29,7 @@
 		"src",
 		"README.md",
 		"ARCHITECTURE.md",
+		"docs",
 		"LICENSE"
 	],
 	"engines": {
@@ -42,7 +43,9 @@
 		"check": "bun run typecheck && bun run lint && bun test test/"
 	},
 	"dependencies": {
-		"acorn": "^8.18.0"
+		"@howaboua/pi-codex-conversion": "3.0.14",
+		"acorn": "^8.18.0",
+		"effect": "4.0.0-rc.108"
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-coding-agent": "*",
