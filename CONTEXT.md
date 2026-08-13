@@ -8,6 +8,14 @@ Pi World is the programmable environment exposed to an agent while preserving ex
 A constrained shell environment isolated from the host project and governed by explicit capabilities and resource budgets.
 _Avoid_: safe shell, sandbox shell
 
+**Virtual Environment**:
+The principal-owned lifetime container for one Virtual Shell instance, its persistent virtual filesystem, execution queue, policy profiles, and cumulative budgets.
+_Avoid_: sandbox, shell session
+
+**Virtual Command Set**:
+A versioned, policy-owned allowlist of built-in commands and shell implementation versions available in a Virtual Environment.
+_Avoid_: installed commands, PATH
+
 **Host Shell**:
 A shell environment authorized to operate on the real project and invoke its native toolchain.
 _Avoid_: normal shell, system shell
