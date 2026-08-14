@@ -247,7 +247,7 @@ export default function (pi: ExtensionAPI) {
 			"Execute TypeScript in a persistent Bun evaluator. Variables, imports, and loaded data persist across calls. " +
 			"Top-level await works. Shell: const out = await Bun.$`cmd`.quiet(); out.stdout.toString(). " +
 			"pi's file tools are mounted as tools.* (tools.read, tools.edit, tools.grep, ...). " +
-			"World: world.agents provides event-backed Pi children and world.web provides hidden Codex search. " +
+			"World: world.agents provides event-backed Pi children, world.web provides hidden Codex search, and world.shell.virtual traces deterministic Virtual admission. " +
 			"Legacy subagents remain available through rlm.run(prompt), whose answer lands in handle.output_file. " +
 			"The final expression of the cell is returned as the result.",
 		parameters: executeSchema,

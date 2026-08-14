@@ -9,6 +9,8 @@ export const WORLD_SPANS = {
 	piProcess: "world.pi.process",
 	agentWait: "world.agents.wait",
 	agentCancel: "world.agents.cancel",
+	shellVirtualExec: "world.shell.virtual.exec",
+	shellWait: "world.shell.wait",
 } as const;
 
 export const WORLD_TRACE_ATTRIBUTE_KEYS = [
@@ -21,11 +23,19 @@ export const WORLD_TRACE_ATTRIBUTE_KEYS = [
 	"world.cancel_reason",
 	"agent.id",
 	"attempt.id",
+	"shell.execution_id",
 	"process.pid",
 ] as const;
 
-const operations = new Set(["agents.spawn", "agents.wait", "agents.cancel", "web.search"]);
-const adapters = new Set(["pi-process", "codex-conversion"]);
+const operations = new Set([
+	"agents.spawn",
+	"agents.wait",
+	"agents.cancel",
+	"web.search",
+	"shell.virtual.exec",
+	"shell.wait",
+]);
+const adapters = new Set(["pi-process", "codex-conversion", "deterministic-shell"]);
 const outcomes = new Set([
 	"succeeded",
 	"failed",
@@ -46,6 +56,9 @@ const errorCodes = new Set([
 	"AGENT_WAIT_FAILED",
 	"AGENT_CANCEL_FAILED",
 	"WEB_SEARCH_FAILED",
+	"SHELL_INVALID_REQUEST",
+	"SHELL_AUTHORITY_DENIED",
+	"SHELL_EXECUTION_NOT_FOUND",
 ]);
 const cancelReasons = new Set(["caller", "execution_timeout", "shutdown"]);
 const opaqueId = /^[a-f0-9]{16}$/;
@@ -70,6 +83,7 @@ const safeAttribute = (key: string, value: unknown) => {
 			return cancelReasons.has(String(value));
 		case "agent.id":
 		case "attempt.id":
+		case "shell.execution_id":
 			return typeof value === "string" && opaqueId.test(value);
 		case "world.depth":
 			return boundedInteger(value, 32);

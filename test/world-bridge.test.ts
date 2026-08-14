@@ -2,9 +2,13 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Effect } from "effect";
 import { EngineManager } from "../src/engine/index.js";
 import { createWorldHost } from "../src/world/bridge.js";
+import { makeDeterministicShell } from "../src/world/deterministic-shell.js";
+import type { WorldOperation } from "../src/world/domain.js";
 import { makeWorldRuntime, type WorldRuntime } from "../src/world/runtime.js";
+import type { AuthorityService } from "../src/world/services.js";
 import { makeDeterministicAgents, makeDeterministicWeb } from "../src/world/test-adapters.js";
 
 const engines: EngineManager[] = [];
@@ -17,13 +21,30 @@ const tempDir = () => {
 	return path;
 };
 
-const harness = (options: { depth?: number; maxDepth?: number; snapshot?: string; waitDelayMs?: number } = {}) => {
+const harness = (
+	options: {
+		depth?: number;
+		maxDepth?: number;
+		snapshot?: string;
+		waitDelayMs?: number;
+		allowedOperations?: readonly WorldOperation[];
+		authority?: AuthorityService;
+	} = {},
+) => {
 	const agents = makeDeterministicAgents({
 		outputs: { alpha: "A", beta: "B", gamma: "C", slow: "finished" },
 		waitDelayMs: options.waitDelayMs,
 	});
 	const web = makeDeterministicWeb();
-	const runtime = makeWorldRuntime({ agents: agents.service, web: web.service, maxDepth: options.maxDepth });
+	const shell = makeDeterministicShell();
+	const runtime = makeWorldRuntime({
+		agents: agents.service,
+		web: web.service,
+		shell: shell.service,
+		maxDepth: options.maxDepth,
+		allowedOperations: options.allowedOperations,
+		authority: options.authority,
+	});
 	runtimes.push(runtime);
 	const host = createWorldHost({ runtime, sessionId: "session-bridge", depth: options.depth ?? 0 });
 	const engine = new EngineManager({
@@ -31,7 +52,7 @@ const harness = (options: { depth?: number; maxDepth?: number; snapshot?: string
 		snapshot: options.snapshot ? { path: options.snapshot, debounceMs: 600_000 } : undefined,
 	});
 	engines.push(engine);
-	return { engine, agents, web, handlers: host.handlers };
+	return { engine, agents, web, shell, handlers: host.handlers };
 };
 
 afterEach(async () => {
@@ -41,6 +62,66 @@ afterEach(async () => {
 });
 
 describe("World evaluator bridge", () => {
+	test("guest traces one Virtual Shell execution through host identity, runtime, and deterministic adapter", async () => {
+		const authorized: Array<{ operation: WorldOperation; sessionId: string; cellId?: string; depth: number }> = [];
+		const authority: AuthorityService = {
+			check: (subject, operation) =>
+				Effect.sync(() => {
+					authorized.push({ operation, ...subject });
+				}),
+		};
+		const { engine, shell, agents, web } = harness({ authority, depth: 1 });
+		const result = await engine.execute(
+			[
+				'const shellExecution = await world.shell.virtual.exec({ script: "echo tracer" });',
+				"let durableShellExecutionId = shellExecution.executionId;",
+				'const worker = await world.agents.spawn("alpha");',
+				'const [terminal, agent, search] = await Promise.all([shellExecution.wait(), worker.wait(), world.web.search("Effect bridge")]);',
+				"({ handle: [shellExecution.id === shellExecution.executionId, typeof shellExecution.wait], terminal, agent: agent.output, search: search.text })",
+			].join("\n"),
+			{ cellId: "shell-cell" },
+		);
+		expect(result.status).toBe("ok");
+		expect(result.result).toContain("shell-execution-test-1");
+		expect(result.result).toContain("virtual-tracer-v1");
+		expect(result.result).toContain("exited");
+		expect(result.result).toContain("A");
+		expect(result.result).toContain("result: Effect bridge");
+		expect(shell.events.map((event) => event._tag)).toEqual(["admitted", "waited"]);
+		expect(agents.events.map((event) => event._tag)).toEqual(["spawned", "waited"]);
+		expect(web.queries).toEqual(["Effect bridge"]);
+		expect(authorized).toEqual([
+			{ operation: "shell.virtual.exec", sessionId: "session-bridge", cellId: "shell-cell", depth: 1 },
+			{ operation: "agents.spawn", sessionId: "session-bridge", cellId: "shell-cell", depth: 1 },
+			{ operation: "shell.wait", sessionId: "session-bridge", cellId: "shell-cell", depth: 1 },
+			{ operation: "agents.wait", sessionId: "session-bridge", cellId: "shell-cell", depth: 1 },
+			{ operation: "web.search", sessionId: "session-bridge", cellId: "shell-cell", depth: 1 },
+		]);
+	});
+
+	test("malformed and denied Virtual Shell requests fail before adapter admission", async () => {
+		const malformedHarness = harness();
+		const malformed = await malformedHarness.engine.execute(
+			"let shellError; try { await world.shell.virtual.exec({ script: 42, sessionId: 'forged' }); } catch (error) { shellError = { code: error.code, operation: error.operation, message: error.message }; } shellError",
+		);
+		expect(malformed.status).toBe("ok");
+		expect(malformed.result).toContain("SHELL_INVALID_REQUEST");
+		expect(malformed.result).toContain("shell.virtual.exec");
+		expect(malformed.result).not.toContain("ParseError");
+		expect(malformedHarness.shell.events).toHaveLength(0);
+
+		const deniedHarness = harness({
+			allowedOperations: ["agents.spawn", "agents.wait", "agents.cancel", "web.search"],
+		});
+		const denied = await deniedHarness.engine.execute(
+			"let shellError; try { await world.shell.virtual.exec({ script: 'denied' }); } catch (error) { shellError = { code: error.code, operation: error.operation }; } shellError",
+		);
+		expect(denied.status).toBe("ok");
+		expect(denied.result).toContain("SHELL_AUTHORITY_DENIED");
+		expect(denied.result).toContain("shell.virtual.exec");
+		expect(deniedHarness.shell.events).toHaveLength(0);
+	});
+
 	test("guest code fans out ergonomic handles and waits without a status or list API", async () => {
 		const { engine, agents, web } = harness();
 		const result = await engine.execute(
@@ -104,17 +185,17 @@ describe("World evaluator bridge", () => {
 		expect(result.result).toContain("cancelled");
 	});
 
-	test("world and ergonomic handles are live-only while plain state restores", async () => {
+	test("world and ergonomic handles are live-only while plain IDs and state restore", async () => {
 		const snapshot = join(tempDir(), "namespace.snapshot");
 		const first = harness({ snapshot });
 		const admitted = await first.engine.execute(
-			'const worker = await world.agents.spawn("alpha"); let durableAgentId = worker.agentId; let plain = { n: 7 };',
+			'const worker = await world.agents.spawn("alpha"); const shellExecution = await world.shell.virtual.exec({ script: "snapshot tracer" }); let durableAgentId = worker.agentId; let durableShellExecutionId = shellExecution.executionId; let plain = { n: 7 };',
 		);
 		expect(admitted.status).toBe("ok");
 		const saved = await first.engine.snapshotState();
-		expect(saved?.saved).toEqual(expect.arrayContaining(["durableAgentId", "plain"]));
+		expect(saved?.saved).toEqual(expect.arrayContaining(["durableAgentId", "durableShellExecutionId", "plain"]));
 		expect(saved?.saved).not.toContain("world");
-		expect(saved?.failed.map((entry) => entry.name)).toContain("worker");
+		expect(saved?.failed.map((entry) => entry.name)).toEqual(expect.arrayContaining(["worker", "shellExecution"]));
 		await first.engine.kill();
 
 		const secondEngine = new EngineManager({
@@ -124,11 +205,11 @@ describe("World evaluator bridge", () => {
 		engines.push(secondEngine);
 		await secondEngine.start();
 		const restored = await secondEngine.restoreState();
-		expect(restored?.restored).toEqual(expect.arrayContaining(["durableAgentId", "plain"]));
-		expect(restored?.restored).not.toContain("worker");
+		expect(restored?.restored).toEqual(expect.arrayContaining(["durableAgentId", "durableShellExecutionId", "plain"]));
+		expect(restored?.restored).not.toEqual(expect.arrayContaining(["worker", "shellExecution"]));
 		const live = await secondEngine.execute(
-			'const probe = await world.web.search("after restart"); String(plain.n) + ":" + typeof world.agents.spawn + ":" + probe.text',
+			'const probe = await world.web.search("after restart"); const nextShell = await world.shell.virtual.exec({ script: "after restart" }); String(plain.n) + ":" + durableShellExecutionId + ":" + typeof world.shell.virtual.exec + ":" + (await nextShell.wait()).mode + ":" + probe.text',
 		);
-		expect(live.result).toContain("7:function:result: after restart");
+		expect(live.result).toContain("7:shell-execution-test-1:function:virtual:result: after restart");
 	});
 });

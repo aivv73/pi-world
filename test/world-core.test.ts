@@ -1,24 +1,36 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Schema } from "effect";
 import { DEFAULT_MAX_DEPTH } from "../src/world/authority.js";
+import { makeDeterministicShell } from "../src/world/deterministic-shell.js";
 import {
 	AgentResultSchema,
 	AgentSpawnRequestSchema,
 	AgentWaitRequestSchema,
 	makeAgentId,
 	makeAttemptId,
+	ShellExecutionIdSchema,
+	ShellTerminalResultSchema,
+	VirtualShellExecRequestSchema,
 	WebSearchRequestSchema,
 	WorldErrorSchema,
 	WorldSubjectSchema,
 } from "../src/world/domain.js";
 import { makeWorldRuntime } from "../src/world/runtime.js";
-import { cancelAgent, searchWeb, spawnAgent, waitForAgent } from "../src/world/services.js";
+import {
+	cancelAgent,
+	executeVirtualShell,
+	type ShellService,
+	searchWeb,
+	spawnAgent,
+	waitForAgent,
+	waitForShellExecution,
+} from "../src/world/services.js";
 import { makeDeterministicAgents, makeDeterministicWeb } from "../src/world/test-adapters.js";
 
 const runtimes: Array<{ dispose: () => Promise<void> }> = [];
 
-function runtime(options: Parameters<typeof makeWorldRuntime>[0]) {
-	const value = makeWorldRuntime(options);
+function runtime(options: Omit<Parameters<typeof makeWorldRuntime>[0], "shell"> & { readonly shell?: ShellService }) {
+	const value = makeWorldRuntime({ ...options, shell: options.shell ?? makeDeterministicShell().service });
 	runtimes.push(value);
 	return value;
 }
@@ -57,6 +69,29 @@ describe("World boundary schemas", () => {
 		expect(error.code).toBe("AGENT_WAIT_TIMEOUT");
 	});
 
+	test("decodes the closed Virtual Shell tracer request and branded terminal result", () => {
+		const request = Schema.decodeUnknownSync(VirtualShellExecRequestSchema, { onExcessProperty: "error" })({
+			schemaVersion: 1,
+			script: "echo virtual",
+		});
+		expect(request.script).toBe("echo virtual");
+		expect(() =>
+			Schema.decodeUnknownSync(VirtualShellExecRequestSchema)({ schemaVersion: 2, script: "echo virtual" }),
+		).toThrow();
+		expect(() =>
+			Schema.decodeUnknownSync(VirtualShellExecRequestSchema, { onExcessProperty: "error" })({
+				schemaVersion: 1,
+				script: "echo virtual",
+				sessionId: "forged",
+			}),
+		).toThrow();
+		expect(() =>
+			Schema.decodeUnknownSync(VirtualShellExecRequestSchema)({ schemaVersion: 1, script: "bad\0script" }),
+		).toThrow();
+		const executionId = Schema.decodeUnknownSync(ShellExecutionIdSchema)("shell-execution-test-1");
+		expect(String(executionId)).toBe("shell-execution-test-1");
+	});
+
 	test("reject malformed or unsafe payloads", () => {
 		expect(() => Schema.decodeUnknownSync(WorldSubjectSchema)({ sessionId: "s", depth: -1 })).toThrow();
 		expect(() => Schema.decodeUnknownSync(AgentSpawnRequestSchema)({ task: 42 })).toThrow();
@@ -87,7 +122,31 @@ describe("World runtime core", () => {
 		expect(web.queries).toEqual(["Effect v4"]);
 	});
 
-	test("default authority allows only the four spike operations and enforces recursion depth", async () => {
+	test("admits one deterministic Virtual Shell execution and retains one immutable result", async () => {
+		const shell = makeDeterministicShell();
+		const world = runtime({
+			agents: makeDeterministicAgents().service,
+			web: makeDeterministicWeb().service,
+			shell: shell.service,
+		});
+		const handle = await world.runPromise(executeVirtualShell(subject, { schemaVersion: 1, script: "echo tracer" }));
+		const first = await world.runPromise(waitForShellExecution(subject, handle));
+		const second = await world.runPromise(waitForShellExecution(subject, handle));
+
+		expect(Schema.decodeUnknownSync(ShellTerminalResultSchema)(first)).toEqual(first);
+		expect(first).toBe(second);
+		expect(Object.isFrozen(first)).toBe(true);
+		expect(Object.isFrozen(first.status)).toBe(true);
+		expect(first).toMatchObject({
+			executionId: handle.executionId,
+			mode: "virtual",
+			profileId: "virtual-tracer-v1",
+			status: { _tag: "exited", exitCode: 0 },
+		});
+		expect(shell.events.map((event) => event._tag)).toEqual(["admitted", "waited", "waited"]);
+	});
+
+	test("default authority allows the reviewed World operations and enforces recursion depth", async () => {
 		const agents = makeDeterministicAgents();
 		const web = makeDeterministicWeb();
 		const world = runtime({ agents: agents.service, web: web.service, maxDepth: 1 });

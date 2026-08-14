@@ -357,6 +357,25 @@ function makeWorldAgentHandle(data: WorldAgentHandleData): WorldAgentHandle {
 	};
 }
 
+interface ShellExecutionHandleData extends Record<string, unknown> {
+	executionId: string;
+}
+
+interface ShellExecutionHandle extends ShellExecutionHandleData {
+	id: string;
+	wait(): Promise<Record<string, unknown>>;
+}
+
+function makeShellExecutionHandle(data: ShellExecutionHandleData): ShellExecutionHandle {
+	return {
+		...data,
+		id: data.executionId,
+		async wait() {
+			return hostRequest("world.shell.wait", { request: { executionId: data.executionId } });
+		},
+	};
+}
+
 const WORLD_HANDLE = {
 	agents: {
 		async spawn(task: string | Record<string, unknown>): Promise<WorldAgentHandle> {
@@ -372,6 +391,16 @@ const WORLD_HANDLE = {
 		async search(query: string | Record<string, unknown>): Promise<Record<string, unknown>> {
 			const request = typeof query === "string" ? { query } : query;
 			return hostRequest("world.web.search", { request });
+		},
+	},
+	shell: {
+		virtual: {
+			async exec(request: Record<string, unknown>): Promise<ShellExecutionHandle> {
+				const data = (await hostRequest("world.shell.virtual.exec", {
+					request: { schemaVersion: 1, ...request },
+				})) as ShellExecutionHandleData;
+				return makeShellExecutionHandle(data);
+			},
 		},
 	},
 };

@@ -5,6 +5,10 @@ import type {
 	AgentResult,
 	AgentSpawnRequest,
 	AgentWaitRequest,
+	ShellExecutionHandleData,
+	ShellTerminalResult,
+	ShellWaitRequest,
+	VirtualShellExecRequest,
 	WebResult,
 	WebSearchRequest,
 	WorldError,
@@ -14,6 +18,9 @@ import type {
 import { opaqueTraceId, WORLD_SPANS, withPrivacySafeSpan } from "./tracing.js";
 
 export type WorldDenied = Extract<WorldError, { readonly _tag: "WorldDenied" }>;
+export type ShellAuthorityDenied = Extract<WorldError, { readonly _tag: "ShellAuthorityDenied" }>;
+export type ShellExecutionNotFound = Extract<WorldError, { readonly _tag: "ShellExecutionNotFound" }>;
+export type AuthorityDenied = WorldDenied | ShellAuthorityDenied;
 export type AgentSpawnError = Extract<WorldError, { readonly _tag: "AgentSpawnError" }>;
 export type AgentNotFoundError = Extract<WorldError, { readonly _tag: "AgentNotFoundError" }>;
 export type AgentWaitTimeoutError = Extract<WorldError, { readonly _tag: "AgentWaitTimeoutError" }>;
@@ -22,7 +29,7 @@ export type AgentCancelError = Extract<WorldError, { readonly _tag: "AgentCancel
 export type WebSearchError = Extract<WorldError, { readonly _tag: "WebSearchError" }>;
 
 export interface AuthorityService {
-	readonly check: (subject: WorldSubject, operation: WorldOperation) => Effect.Effect<void, WorldDenied>;
+	readonly check: (subject: WorldSubject, operation: WorldOperation) => Effect.Effect<void, AuthorityDenied>;
 }
 
 export interface AgentsService {
@@ -37,9 +44,15 @@ export interface WebService {
 	readonly search: (request: WebSearchRequest) => Effect.Effect<WebResult, WebSearchError>;
 }
 
+export interface ShellService {
+	readonly virtualExec: (request: VirtualShellExecRequest) => Effect.Effect<ShellExecutionHandleData>;
+	readonly wait: (request: ShellWaitRequest) => Effect.Effect<ShellTerminalResult, ShellExecutionNotFound>;
+}
+
 export const Authority = Context.Service<AuthorityService>("World/Authority");
 export const Agents = Context.Service<AgentsService>("World/Agents");
 export const Web = Context.Service<WebService>("World/Web");
+export const Shell = Context.Service<ShellService>("World/Shell");
 
 export const authorize = (subject: WorldSubject, operation: WorldOperation) =>
 	Effect.gen(function* () {
@@ -131,4 +144,30 @@ export const searchWeb = (subject: WorldSubject, request: WebSearchRequest) =>
 			const web = yield* Web;
 			return yield* web.search(request);
 		}),
+	);
+
+export const executeVirtualShell = (subject: WorldSubject, request: VirtualShellExecRequest) =>
+	tracedOperation(
+		subject,
+		"shell.virtual.exec",
+		WORLD_SPANS.shellVirtualExec,
+		Effect.gen(function* () {
+			yield* authorize(subject, "shell.virtual.exec");
+			const shell = yield* Shell;
+			return yield* shell.virtualExec(request);
+		}),
+		{ "world.adapter": "deterministic-shell" },
+	);
+
+export const waitForShellExecution = (subject: WorldSubject, request: ShellWaitRequest) =>
+	tracedOperation(
+		subject,
+		"shell.wait",
+		WORLD_SPANS.shellWait,
+		Effect.gen(function* () {
+			yield* authorize(subject, "shell.wait");
+			const shell = yield* Shell;
+			return yield* shell.wait(request);
+		}),
+		{ "world.adapter": "deterministic-shell", "shell.execution_id": opaqueTraceId(request.executionId) },
 	);

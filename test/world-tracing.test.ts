@@ -75,6 +75,11 @@ describe("World tracing", () => {
 		worlds.push(world);
 		const call = { signal: new AbortController().signal, cellId: "cell-trace" };
 		await world.handlers["world.web.search"]!({ request: { query: "query-canary-8" } }, call);
+		const shellHandle = await world.handlers["world.shell.virtual.exec"]!(
+			{ request: { schemaVersion: 1, script: "shell-script-canary-8" } },
+			call,
+		);
+		await world.handlers["world.shell.wait"]!({ request: { executionId: shellHandle.executionId } }, call);
 		const handle = await world.handlers["world.agents.spawn"]!(
 			{ request: { task: "prompt-canary-8", model: "provider/model-canary-8" } },
 			call,
@@ -91,6 +96,8 @@ describe("World tracing", () => {
 		await world.handlers["world.agents.wait"]!({ request: { agentId: handle.agentId } }, call);
 		const spans = memory.spans();
 		expect(parentOf(spans, WORLD_SPANS.webSearch)?.name).toBe(WORLD_SPANS.coordinator);
+		expect(parentOf(spans, WORLD_SPANS.shellVirtualExec)?.name).toBe(WORLD_SPANS.coordinator);
+		expect(parentOf(spans, WORLD_SPANS.shellWait)?.name).toBe(WORLD_SPANS.coordinator);
 		expect(parentOf(spans, WORLD_SPANS.agentSpawn)?.name).toBe(WORLD_SPANS.coordinator);
 		expect(parentOf(spans, WORLD_SPANS.agentAttempt)?.name).toBe(WORLD_SPANS.agentSpawn);
 		expect(parentOf(spans, WORLD_SPANS.piProcess)?.name).toBe(WORLD_SPANS.agentAttempt);
@@ -114,6 +121,7 @@ describe("World tracing", () => {
 			"credential-canary-8",
 			"env-canary-8",
 			"model-canary-8",
+			"shell-script-canary-8",
 		]) {
 			expect(exported).not.toContain(canary);
 			expect(exportedExits).not.toContain(canary);

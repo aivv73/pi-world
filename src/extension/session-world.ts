@@ -4,6 +4,7 @@ import type { HostRequestHandlers } from "../engine/index.js";
 import { StaticAuthorityLive } from "../world/authority.js";
 import { createWorldHost } from "../world/bridge.js";
 import { CodexConversionWebLive, type CodexWebSearchExecutor } from "../world/codex-conversion-web.js";
+import { DeterministicShellLive } from "../world/deterministic-shell.js";
 import { type PiChildSpawnInput, type PiChildSpec, PiProcessAgentsLive } from "../world/pi-process-agents.js";
 import type { WorldRuntime } from "../world/runtime.js";
 
@@ -60,6 +61,7 @@ export const createSessionWorld = (options: SessionWorldOptions): SessionWorld =
 				spawnCommand: options.spawnCommand,
 			}),
 			CodexConversionWebLive({ getContext: options.getContext, execute: options.executeWeb }),
+			DeterministicShellLive(),
 			...(options.tracer ? [Layer.succeed(Tracer.Tracer)(options.tracer)] : []),
 		),
 	);

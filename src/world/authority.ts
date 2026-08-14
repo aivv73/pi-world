@@ -1,6 +1,6 @@
 import { Effect, Layer } from "effect";
 import type { WorldOperation, WorldSubject } from "./domain.js";
-import { Authority, type AuthorityService, type WorldDenied } from "./services.js";
+import { Authority, type AuthorityService, type ShellAuthorityDenied, type WorldDenied } from "./services.js";
 
 export const DEFAULT_MAX_DEPTH = 2;
 export const DEFAULT_ALLOWED_OPERATIONS: readonly WorldOperation[] = [
@@ -8,6 +8,8 @@ export const DEFAULT_ALLOWED_OPERATIONS: readonly WorldOperation[] = [
 	"agents.wait",
 	"agents.cancel",
 	"web.search",
+	"shell.virtual.exec",
+	"shell.wait",
 ];
 
 export interface StaticAuthorityOptions {
@@ -15,12 +17,10 @@ export interface StaticAuthorityOptions {
 	readonly allowedOperations?: readonly WorldOperation[];
 }
 
-const denied = (operation: WorldOperation, message: string): WorldDenied => ({
-	_tag: "WorldDenied",
-	code: "WORLD_ACCESS_DENIED",
-	operation,
-	message,
-});
+const denied = (operation: WorldOperation, message: string): WorldDenied | ShellAuthorityDenied =>
+	operation === "shell.virtual.exec" || operation === "shell.wait"
+		? { _tag: "ShellAuthorityDenied", code: "SHELL_AUTHORITY_DENIED", operation, message }
+		: { _tag: "WorldDenied", code: "WORLD_ACCESS_DENIED", operation, message };
 
 export const makeStaticAuthority = (options: StaticAuthorityOptions = {}): AuthorityService => {
 	const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;

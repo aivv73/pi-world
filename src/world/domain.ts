@@ -6,8 +6,12 @@ export type AgentId = typeof AgentIdSchema.Type;
 export const AttemptIdSchema = Schema.String.pipe(Schema.brand("AttemptId"));
 export type AttemptId = typeof AttemptIdSchema.Type;
 
+export const ShellExecutionIdSchema = Schema.String.pipe(Schema.brand("ShellExecutionId"));
+export type ShellExecutionId = typeof ShellExecutionIdSchema.Type;
+
 export const makeAgentId = (value: string) => Schema.decodeUnknownSync(AgentIdSchema)(value);
 export const makeAttemptId = (value: string) => Schema.decodeUnknownSync(AttemptIdSchema)(value);
+export const makeShellExecutionId = (value: string) => Schema.decodeUnknownSync(ShellExecutionIdSchema)(value);
 
 export type JsonValue =
 	| null
@@ -40,6 +44,8 @@ export const WorldOperationSchema = Schema.Literals([
 	"agents.wait",
 	"agents.cancel",
 	"web.search",
+	"shell.virtual.exec",
+	"shell.wait",
 ] as const);
 export type WorldOperation = typeof WorldOperationSchema.Type;
 
@@ -105,6 +111,27 @@ const WebSearchErrorSchema = Schema.Struct({
 	message: Schema.String,
 });
 
+const ShellInvalidRequestSchema = Schema.Struct({
+	_tag: Schema.Literal("ShellInvalidRequest"),
+	code: Schema.Literal("SHELL_INVALID_REQUEST"),
+	operation: Schema.Literals(["shell.virtual.exec", "shell.wait"] as const),
+	message: Schema.String,
+});
+
+const ShellAuthorityDeniedSchema = Schema.Struct({
+	_tag: Schema.Literal("ShellAuthorityDenied"),
+	code: Schema.Literal("SHELL_AUTHORITY_DENIED"),
+	operation: Schema.Literals(["shell.virtual.exec", "shell.wait"] as const),
+	message: Schema.String,
+});
+
+const ShellExecutionNotFoundSchema = Schema.Struct({
+	_tag: Schema.Literal("ShellExecutionNotFound"),
+	code: Schema.Literal("SHELL_EXECUTION_NOT_FOUND"),
+	operation: Schema.Literal("shell.wait"),
+	message: Schema.String,
+});
+
 export const WorldErrorSchema = Schema.Union([
 	WorldInvalidRequestSchema,
 	WorldInternalErrorSchema,
@@ -115,6 +142,9 @@ export const WorldErrorSchema = Schema.Union([
 	AgentWaitErrorSchema,
 	AgentCancelErrorSchema,
 	WebSearchErrorSchema,
+	ShellInvalidRequestSchema,
+	ShellAuthorityDeniedSchema,
+	ShellExecutionNotFoundSchema,
 ]);
 export type WorldError = typeof WorldErrorSchema.Type;
 
@@ -188,3 +218,63 @@ export const WebResultSchema = Schema.Struct({
 	details: Schema.optionalKey(JsonValueSchema),
 });
 export type WebResult = typeof WebResultSchema.Type;
+
+const VirtualShellScriptSchema = Schema.String.check(
+	Schema.isMinLength(1),
+	Schema.isMaxLength(256 * 1024),
+	Schema.makeFilter((value: string) => !value.includes("\0")),
+);
+
+export const VirtualShellExecRequestSchema = Schema.Struct({
+	schemaVersion: Schema.Literal(1),
+	script: VirtualShellScriptSchema,
+});
+export type VirtualShellExecRequest = typeof VirtualShellExecRequestSchema.Type;
+
+export const ShellWaitRequestSchema = Schema.Struct({
+	executionId: ShellExecutionIdSchema,
+});
+export type ShellWaitRequest = typeof ShellWaitRequestSchema.Type;
+
+export const ShellExecutionHandleDataSchema = Schema.Struct({
+	executionId: ShellExecutionIdSchema,
+});
+export type ShellExecutionHandleData = typeof ShellExecutionHandleDataSchema.Type;
+
+export const ShellDurationBucketSchema = Schema.Literals([
+	"lt_10ms",
+	"lt_100ms",
+	"lt_1s",
+	"lt_10s",
+	"lt_1m",
+	"ge_1m",
+] as const);
+
+export const ShellOutputSchema = Schema.Struct({
+	encoding: Schema.Literal("base64"),
+	data: Schema.String,
+	capturedBytes: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+	totalBytes: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+	truncated: Schema.Boolean,
+});
+
+export const ShellTerminalResultSchema = Schema.Struct({
+	schemaVersion: Schema.Literal(1),
+	executionId: ShellExecutionIdSchema,
+	mode: Schema.Literal("virtual"),
+	profileId: Schema.Literal("virtual-tracer-v1"),
+	started: Schema.Literal(true),
+	queueDurationBucket: ShellDurationBucketSchema,
+	runtimeDurationBucket: ShellDurationBucketSchema,
+	stdout: ShellOutputSchema,
+	stderr: ShellOutputSchema,
+	sensitivity: Schema.Literal("untrusted_output"),
+	sideEffectsMayHaveOccurred: Schema.Literal(false),
+	cleanup: Schema.Literal("not_needed"),
+	virtualState: Schema.Struct({ disposition: Schema.Literal("unchanged") }),
+	status: Schema.Struct({
+		_tag: Schema.Literal("exited"),
+		exitCode: Schema.Literal(0),
+	}),
+});
+export type ShellTerminalResult = typeof ShellTerminalResultSchema.Type;

@@ -183,8 +183,8 @@ Promise rather than model-written polling. The host reconstructs the authority
 subject from its own session, depth, and issuing-cell context, schema-decodes
 requests before adapters run, and sends only stable safe error fields back.
 
-One `SessionWorldOwner` creates the Authority, Agents, and Web Layers for the
-Pi session, not for an execute cell or evaluator generation. A wedged evaluator
+One `SessionWorldOwner` creates the Authority, Agents, Web, and Shell Layers for
+the Pi session, not for an execute cell or evaluator generation. A wedged evaluator
 can be discarded and rebuilt while admitted World children continue; session
 shutdown disposes the managed runtime, whose Agents Layer performs bounded
 process-group cleanup and awaits child close. World child Pi commands use
@@ -194,13 +194,23 @@ installed copy from loading twice.
 The live `world` binding is registered in the same internal-binding table as
 `rlm` and `tools`. Snapshots skip it, namespace listing hides it, and
 bootstrap overwrites any stale impostor restored under that name. Agent handles
-contain closures and are intentionally reported as unserialisable; persist a
-plain AgentId only, without treating it as a resumable execution.
+contain closures and are intentionally reported as unserialisable; persist plain
+AgentId or ShellExecutionId values only, without treating either ID as a live
+handle.
+
+The first `world.shell.virtual.exec` slice is intentionally a non-executing
+contract tracer. The bridge strictly decodes the schema-v1 script request, the
+host reconstructs the subject before authorization, and a session-owned
+deterministic adapter admits an opaque execution ID. `wait()` returns one frozen
+success record under the explicit `virtual-tracer-v1` profile. This proves the
+capability path without pretending Host or Virtual commands ran; real just-bash
+execution, cancellation, attachment, retention, and the full terminal taxonomy
+remain separate implementation slices.
 
 ### World traces semantics, never payloads
 
 World service calls create stable Effect spans for the coordinator, web search,
-agent spawn, attempt, Pi process, wait, and cancel operations. Attempt and
+agent spawn, attempt, Pi process, wait, cancel, and Virtual Shell tracer operations. Attempt and
 process observers are forked into the Agents Layer's explicit session scope, so
 their parent span is inherited across the fiber boundary and their lifetime is
 not cut short when admission returns. Shutdown settles processes before closing

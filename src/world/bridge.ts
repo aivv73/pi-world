@@ -6,6 +6,10 @@ import {
 	AgentResultSchema,
 	AgentSpawnRequestSchema,
 	AgentWaitRequestSchema,
+	ShellExecutionHandleDataSchema,
+	ShellTerminalResultSchema,
+	ShellWaitRequestSchema,
+	VirtualShellExecRequestSchema,
 	WebResultSchema,
 	WebSearchRequestSchema,
 	type WorldError,
@@ -14,7 +18,14 @@ import {
 	WorldSubjectSchema,
 } from "./domain.js";
 import type { WorldRuntime } from "./runtime.js";
-import { cancelAgent, searchWeb, spawnAgent, waitForAgent } from "./services.js";
+import {
+	cancelAgent,
+	executeVirtualShell,
+	searchWeb,
+	spawnAgent,
+	waitForAgent,
+	waitForShellExecution,
+} from "./services.js";
 
 export interface WorldBridgeOptions {
 	readonly runtime: WorldRuntime;
@@ -22,12 +33,20 @@ export interface WorldBridgeOptions {
 	readonly depth: number;
 }
 
-const invalidRequest = (operation: WorldOperation): WorldError => ({
-	_tag: "WorldInvalidRequest",
-	code: "WORLD_INVALID_REQUEST",
-	operation,
-	message: `invalid request for world operation ${operation}`,
-});
+const invalidRequest = (operation: WorldOperation): WorldError =>
+	operation === "shell.virtual.exec" || operation === "shell.wait"
+		? {
+				_tag: "ShellInvalidRequest",
+				code: "SHELL_INVALID_REQUEST",
+				operation,
+				message: "invalid Virtual Shell execution request",
+			}
+		: {
+				_tag: "WorldInvalidRequest",
+				code: "WORLD_INVALID_REQUEST",
+				operation,
+				message: `invalid request for world operation ${operation}`,
+			};
 
 const internalError = (operation: WorldOperation): WorldError => ({
 	_tag: "WorldInternalError",
@@ -42,9 +61,10 @@ const decode = <S extends Schema.ConstraintDecoder<unknown>>(
 	schema: S,
 	input: unknown,
 	operation: WorldOperation,
+	strict = false,
 ): S["Type"] => {
 	try {
-		return Schema.decodeUnknownSync(schema)(input);
+		return Schema.decodeUnknownSync(schema, strict ? { onExcessProperty: "error" } : undefined)(input);
 	} catch {
 		throw boundaryError(invalidRequest(operation));
 	}
@@ -110,6 +130,16 @@ export const createWorldHost = (options: WorldBridgeOptions): { readonly handler
 			const request = decode(WebSearchRequestSchema, payload.request, "web.search");
 			const result = await options.runtime.runPromise(searchWeb(subject, request), { signal });
 			return decode(WebResultSchema, result, "web.search");
+		}),
+		"world.shell.virtual.exec": handler(options, "shell.virtual.exec", async (payload, subject, signal) => {
+			const request = decode(VirtualShellExecRequestSchema, payload.request, "shell.virtual.exec", true);
+			const result = await options.runtime.runPromise(executeVirtualShell(subject, request), { signal });
+			return decode(ShellExecutionHandleDataSchema, result, "shell.virtual.exec");
+		}),
+		"world.shell.wait": handler(options, "shell.wait", async (payload, subject, signal) => {
+			const request = decode(ShellWaitRequestSchema, payload.request, "shell.wait", true);
+			const result = await options.runtime.runPromise(waitForShellExecution(subject, request), { signal });
+			return decode(ShellTerminalResultSchema, result, "shell.wait");
 		}),
 	},
 });

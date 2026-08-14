@@ -66,6 +66,12 @@ returns an ergonomic handle at admission; `wait()` settles from process close
 and `cancel()` awaits bounded cleanup. `spawnMany()` admits a fan-out before
 anything is awaited. Legacy `rlm.run` remains available for compatibility.
 
+**Virtual Shell as a traced World call.** `world.shell.virtual.exec({ script })`
+now exercises the complete guest-to-authority-to-session-runtime path and returns
+a live handle whose `wait()` yields a schema-v1 terminal record. This first
+adapter is deliberately deterministic and executes nothing; the ambient-free
+Virtual Environment replaces it in the next implementation slice.
+
 **Cancellation that costs one cell.** Interrupting a running cell leaves the
 namespace intact, and the cancelled cell cannot keep writing to it afterwards.
 
@@ -176,10 +182,11 @@ src/extension/   the pi integration
   render.ts      binds pi's theme and width primitives to it
 src/world/        experimental Effect-native runtime core
   domain.ts       IDs, schemas, terminal results, and safe errors
-  services.ts     Authority, Agents, and Web contracts
+  services.ts     Authority, Agents, Web, and Shell contracts
   bridge.ts       schema/authority boundary for the guest world facade
   runtime.ts      Layer composition and ManagedRuntime factory
   pi-process-agents.ts  session-scoped Pi child process adapter
   codex-conversion-web.ts  isolated pinned Codex web adapter
+  deterministic-shell.ts  non-executing Virtual Shell contract tracer
   tracing.ts      privacy-safe semantic spans and in-memory test tracer
 ```

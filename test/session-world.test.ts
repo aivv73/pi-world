@@ -138,6 +138,8 @@ describe("session World composition", () => {
 		const prompt = buildRlmTsPrompt({ cwd: "/workspace", depth: 0, allowRecursion: false });
 		expect(prompt).toContain("world.agents.spawnMany(tasks)");
 		expect(prompt).toContain("world.web.search(query)");
+		expect(prompt).toContain("world.shell.virtual.exec({ script })");
+		expect(prompt).toContain("tracer deliberately executes nothing");
 		expect(prompt).toContain("no World list/status polling API");
 		expect(prompt).not.toContain("ManagedRuntime");
 	});
