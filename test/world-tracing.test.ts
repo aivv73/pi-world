@@ -53,10 +53,13 @@ describe("World tracing", () => {
 		writeFileSync(
 			script,
 			[
-				'process.stderr.write("stderr-canary-8\n");',
+				// No escape sequences here: an escaped newline in this TypeScript
+				// string becomes a real newline in the generated child, which
+				// silently crashes the child the moment it parses.
+				'process.stderr.write("stderr-canary-8");',
 				// A long-lived child keeps the attempt/process spans safely in
 				// their started state until the test asserts on them.
-				'setTimeout(() => { process.stdout.write("output-canary-8\n"); process.exit(0); }, 2000);',
+				"setTimeout(() => { process.stdout.write('output-canary-8'); process.exit(0); }, 2000);",
 			].join("\n"),
 		);
 		const memory = makeInMemoryWorldTracer();
