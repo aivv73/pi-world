@@ -54,7 +54,9 @@ describe("World tracing", () => {
 			script,
 			[
 				'process.stderr.write("stderr-canary-8\n");',
-				'setTimeout(() => { process.stdout.write("output-canary-8\n"); process.exit(0); }, 80);',
+				// A long-lived child keeps the attempt/process spans safely in
+				// their started state until the test asserts on them.
+				'setTimeout(() => { process.stdout.write("output-canary-8\n"); process.exit(0); }, 2000);',
 			].join("\n"),
 		);
 		const memory = makeInMemoryWorldTracer();

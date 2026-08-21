@@ -133,11 +133,13 @@ describe("subagent host", () => {
 			depth: 0,
 			maxDepth: 2,
 			selfChildId: "sub-parent-id",
-			spawnCommand: () => ({ command: "sh", args: ["-c", 'echo "my-id:$PI_RLM_CHILD_ID"'] }),
+			// The child stays alive so the frame record is observed while the
+			// child is genuinely running instead of racing its exit finalizer.
+			spawnCommand: () => ({ command: "sh", args: ["-c", 'echo "my-id:$PI_RLM_CHILD_ID"; sleep 2'] }),
 		});
 		const m = new EngineManager({ hostHandlers: host.handlers });
 		managers.push(m);
-		const r = await m.execute('await rlm.run("audit the pdfs");', { cellId: "cell-spawn-site" });
+		const r = await m.execute('let pendingRun = rlm.run("audit the pdfs"); "admitted";', { cellId: "cell-spawn-site" });
 		expect(r.status).toBe("ok");
 		const entry = host.entries()[0];
 		const metaPath = join(d, `${entry.rlm_child_id}.json`);
@@ -149,10 +151,17 @@ describe("subagent host", () => {
 		expect(meta.parent_child_id).toBe("sub-parent-id");
 		expect(typeof meta.spawned_at).toBe("string");
 
-		await new Promise((resolve) => setTimeout(resolve, 300));
-		const final = JSON.parse(readFileSync(metaPath, "utf8"));
-		expect(final.status).toBe("completed");
-		expect(typeof final.finished_at).toBe("string");
+		await m.execute("await pendingRun;");
+		// The cell resolves from the close event; the exit finalizer lands
+		// shortly after, so completion is awaited rather than assumed.
+		let final: { status: string; finished_at?: string } | undefined;
+		for (let attempt = 0; attempt < 200; attempt += 1) {
+			final = JSON.parse(readFileSync(metaPath, "utf8"));
+			if (final?.status === "completed") break;
+			await new Promise((resolve) => setTimeout(resolve, 25));
+		}
+		expect(final?.status).toBe("completed");
+		expect(typeof final?.finished_at).toBe("string");
 		// The child can label its own records: lineage links grandchildren to it.
 		expect(readFileSync(entry.output_file, "utf8")).toContain(`my-id:${entry.rlm_child_id}`);
 	});

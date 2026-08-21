@@ -144,7 +144,9 @@ describe("Codex conversion Web adapter", () => {
 		expect(readFileSync(readyFile, "utf8")).toBe("ready");
 		controller.abort();
 		await expect(pending).rejects.toBeDefined();
-		for (let attempt = 0; attempt < 40 && !existsSync(signalFile); attempt++) {
+		// Under load the native process can take well over a second to be
+		// reaped after the interrupt, so the signal budget is generous.
+		for (let attempt = 0; attempt < 400 && !existsSync(signalFile); attempt++) {
 			await new Promise((resolve) => setTimeout(resolve, 25));
 		}
 		expect(readFileSync(signalFile, "utf8")).toBe("terminated");
