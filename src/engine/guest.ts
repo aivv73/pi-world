@@ -363,15 +363,21 @@ interface ShellExecutionHandleData extends Record<string, unknown> {
 
 interface ShellExecutionHandle extends ShellExecutionHandleData {
 	id: string;
-	wait(): Promise<Record<string, unknown>>;
+	wait(options?: { timeoutMs?: number }): Promise<Record<string, unknown>>;
+	cancel(): Promise<void>;
 }
 
 function makeShellExecutionHandle(data: ShellExecutionHandleData): ShellExecutionHandle {
 	return {
 		...data,
 		id: data.executionId,
-		async wait() {
-			return hostRequest("world.shell.wait", { request: { executionId: data.executionId } });
+		async wait(options: { timeoutMs?: number } = {}) {
+			return hostRequest("world.shell.wait", {
+				request: { executionId: data.executionId, timeoutMs: options.timeoutMs },
+			});
+		},
+		async cancel() {
+			await hostRequest("world.shell.cancel", { request: { executionId: data.executionId } });
 		},
 	};
 }
@@ -401,6 +407,19 @@ const WORLD_HANDLE = {
 				})) as ShellExecutionHandleData;
 				return makeShellExecutionHandle(data);
 			},
+		},
+		// wait/cancel/attach are mode-agnostic lifecycle operations addressed
+		// by exact ID; there is deliberately no list, search, status, or
+		// retry surface.
+		async wait(request: { executionId: string; timeoutMs?: number }): Promise<Record<string, unknown>> {
+			return hostRequest("world.shell.wait", { request });
+		},
+		async cancel(request: { executionId: string }): Promise<void> {
+			await hostRequest("world.shell.cancel", { request });
+		},
+		async attach(request: { executionId: string }): Promise<ShellExecutionHandle> {
+			const data = (await hostRequest("world.shell.attach", { request })) as ShellExecutionHandleData;
+			return makeShellExecutionHandle(data);
 		},
 	},
 };

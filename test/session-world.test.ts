@@ -139,8 +139,12 @@ describe("session World composition", () => {
 		expect(prompt).toContain("world.agents.spawnMany(tasks)");
 		expect(prompt).toContain("world.web.search(query)");
 		expect(prompt).toContain("world.shell.virtual.exec({ script })");
+		expect(prompt).toContain("world.shell.cancel({ executionId })");
+		expect(prompt).toContain("world.shell.attach({ executionId })");
+		expect(prompt).toContain("withdraws the observation without cancelling");
 		expect(prompt).toContain("tracer deliberately executes nothing");
 		expect(prompt).toContain("no World list/status polling API");
+		expect(prompt).toContain("no shell list/search/status/retry API");
 		expect(prompt).not.toContain("ManagedRuntime");
 	});
 

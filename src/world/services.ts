@@ -5,6 +5,8 @@ import type {
 	AgentResult,
 	AgentSpawnRequest,
 	AgentWaitRequest,
+	ShellAttachRequest,
+	ShellCancelRequest,
 	ShellExecutionHandleData,
 	ShellTerminalResult,
 	ShellWaitRequest,
@@ -20,6 +22,7 @@ import { opaqueTraceId, WORLD_SPANS, withPrivacySafeSpan } from "./tracing.js";
 export type WorldDenied = Extract<WorldError, { readonly _tag: "WorldDenied" }>;
 export type ShellAuthorityDenied = Extract<WorldError, { readonly _tag: "ShellAuthorityDenied" }>;
 export type ShellExecutionNotFound = Extract<WorldError, { readonly _tag: "ShellExecutionNotFound" }>;
+export type ShellWaitTimeoutError = Extract<WorldError, { readonly _tag: "ShellWaitTimeoutError" }>;
 export type AuthorityDenied = WorldDenied | ShellAuthorityDenied;
 export type AgentSpawnError = Extract<WorldError, { readonly _tag: "AgentSpawnError" }>;
 export type AgentNotFoundError = Extract<WorldError, { readonly _tag: "AgentNotFoundError" }>;
@@ -45,8 +48,24 @@ export interface WebService {
 }
 
 export interface ShellService {
-	readonly virtualExec: (request: VirtualShellExecRequest) => Effect.Effect<ShellExecutionHandleData>;
-	readonly wait: (request: ShellWaitRequest) => Effect.Effect<ShellTerminalResult, ShellExecutionNotFound>;
+	readonly virtualExec: (
+		request: VirtualShellExecRequest,
+		owner: WorldSubject,
+	) => Effect.Effect<ShellExecutionHandleData>;
+	readonly wait: (
+		request: ShellWaitRequest,
+		subject: WorldSubject,
+	) => Effect.Effect<ShellTerminalResult, ShellExecutionNotFound | ShellWaitTimeoutError>;
+	// Cancellation is idempotent: repeating it on a terminal execution still
+	// succeeds, so awaited cancellations and waits converge on the one
+	// retained terminal result.
+	readonly cancel: (request: ShellCancelRequest, subject: WorldSubject) => Effect.Effect<void, ShellExecutionNotFound>;
+	// Exact-ID attachment is the only handle-recovery path: no listing, no
+	// search, no broad status — and every refusal stays indistinguishable.
+	readonly attach: (
+		request: ShellAttachRequest,
+		subject: WorldSubject,
+	) => Effect.Effect<ShellExecutionHandleData, ShellExecutionNotFound>;
 }
 
 export const Authority = Context.Service<AuthorityService>("World/Authority");
@@ -154,7 +173,7 @@ export const executeVirtualShell = (subject: WorldSubject, request: VirtualShell
 		Effect.gen(function* () {
 			yield* authorize(subject, "shell.virtual.exec");
 			const shell = yield* Shell;
-			return yield* shell.virtualExec(request);
+			return yield* shell.virtualExec(request, subject);
 		}),
 		{ "world.adapter": "deterministic-shell" },
 	);
@@ -167,7 +186,41 @@ export const waitForShellExecution = (subject: WorldSubject, request: ShellWaitR
 		Effect.gen(function* () {
 			yield* authorize(subject, "shell.wait");
 			const shell = yield* Shell;
-			return yield* shell.wait(request);
+			return yield* shell.wait(request, subject);
+		}),
+		{
+			"world.adapter": "deterministic-shell",
+			"shell.execution_id": opaqueTraceId(request.executionId),
+			...(request.timeoutMs === undefined ? {} : { "world.timeout_ms": request.timeoutMs }),
+		},
+	);
+
+export const cancelShellExecution = (subject: WorldSubject, request: ShellCancelRequest) =>
+	tracedOperation(
+		subject,
+		"shell.cancel",
+		WORLD_SPANS.shellCancel,
+		Effect.gen(function* () {
+			yield* authorize(subject, "shell.cancel");
+			const shell = yield* Shell;
+			yield* shell.cancel(request, subject);
+		}),
+		{
+			"world.adapter": "deterministic-shell",
+			"shell.execution_id": opaqueTraceId(request.executionId),
+			"world.cancel_reason": "caller",
+		},
+	);
+
+export const attachShellExecution = (subject: WorldSubject, request: ShellAttachRequest) =>
+	tracedOperation(
+		subject,
+		"shell.attach",
+		WORLD_SPANS.shellAttach,
+		Effect.gen(function* () {
+			yield* authorize(subject, "shell.attach");
+			const shell = yield* Shell;
+			return yield* shell.attach(request, subject);
 		}),
 		{ "world.adapter": "deterministic-shell", "shell.execution_id": opaqueTraceId(request.executionId) },
 	);

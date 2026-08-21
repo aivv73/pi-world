@@ -39,13 +39,17 @@ export const WorldSubjectSchema = Schema.Struct({
 });
 export type WorldSubject = typeof WorldSubjectSchema.Type;
 
+const SHELL_OPERATIONS = ["shell.virtual.exec", "shell.wait", "shell.cancel", "shell.attach"] as const;
+export type ShellOperation = (typeof SHELL_OPERATIONS)[number];
+export const isShellOperation = (operation: string): operation is ShellOperation =>
+	(SHELL_OPERATIONS as readonly string[]).includes(operation);
+
 export const WorldOperationSchema = Schema.Literals([
 	"agents.spawn",
 	"agents.wait",
 	"agents.cancel",
 	"web.search",
-	"shell.virtual.exec",
-	"shell.wait",
+	...SHELL_OPERATIONS,
 ] as const);
 export type WorldOperation = typeof WorldOperationSchema.Type;
 
@@ -114,21 +118,33 @@ const WebSearchErrorSchema = Schema.Struct({
 const ShellInvalidRequestSchema = Schema.Struct({
 	_tag: Schema.Literal("ShellInvalidRequest"),
 	code: Schema.Literal("SHELL_INVALID_REQUEST"),
-	operation: Schema.Literals(["shell.virtual.exec", "shell.wait"] as const),
+	operation: Schema.Literals(SHELL_OPERATIONS),
 	message: Schema.String,
 });
 
 const ShellAuthorityDeniedSchema = Schema.Struct({
 	_tag: Schema.Literal("ShellAuthorityDenied"),
 	code: Schema.Literal("SHELL_AUTHORITY_DENIED"),
-	operation: Schema.Literals(["shell.virtual.exec", "shell.wait"] as const),
+	operation: Schema.Literals(SHELL_OPERATIONS),
 	message: Schema.String,
 });
 
+// One error for every indistinguishable attachment failure: an unknown ID, a
+// foreign or unauthorized subject, and an expired/evicted ID must read the
+// same, or the error channel becomes an execution enumerator.
 const ShellExecutionNotFoundSchema = Schema.Struct({
 	_tag: Schema.Literal("ShellExecutionNotFound"),
 	code: Schema.Literal("SHELL_EXECUTION_NOT_FOUND"),
+	operation: Schema.Literals(["shell.wait", "shell.cancel", "shell.attach"] as const),
+	message: Schema.String,
+});
+
+const ShellWaitTimeoutErrorSchema = Schema.Struct({
+	_tag: Schema.Literal("ShellWaitTimeoutError"),
+	code: Schema.Literal("SHELL_WAIT_TIMEOUT"),
 	operation: Schema.Literal("shell.wait"),
+	executionId: ShellExecutionIdSchema,
+	timeoutMs: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
 	message: Schema.String,
 });
 
@@ -145,6 +161,7 @@ export const WorldErrorSchema = Schema.Union([
 	ShellInvalidRequestSchema,
 	ShellAuthorityDeniedSchema,
 	ShellExecutionNotFoundSchema,
+	ShellWaitTimeoutErrorSchema,
 ]);
 export type WorldError = typeof WorldErrorSchema.Type;
 
@@ -233,8 +250,19 @@ export type VirtualShellExecRequest = typeof VirtualShellExecRequestSchema.Type;
 
 export const ShellWaitRequestSchema = Schema.Struct({
 	executionId: ShellExecutionIdSchema,
+	timeoutMs: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
 });
 export type ShellWaitRequest = typeof ShellWaitRequestSchema.Type;
+
+export const ShellCancelRequestSchema = Schema.Struct({
+	executionId: ShellExecutionIdSchema,
+});
+export type ShellCancelRequest = typeof ShellCancelRequestSchema.Type;
+
+export const ShellAttachRequestSchema = Schema.Struct({
+	executionId: ShellExecutionIdSchema,
+});
+export type ShellAttachRequest = typeof ShellAttachRequestSchema.Type;
 
 export const ShellExecutionHandleDataSchema = Schema.Struct({
 	executionId: ShellExecutionIdSchema,
@@ -249,32 +277,81 @@ export const ShellDurationBucketSchema = Schema.Literals([
 	"lt_1m",
 	"ge_1m",
 ] as const);
+export type ShellDurationBucket = typeof ShellDurationBucketSchema.Type;
+
+const BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/;
+
+// The output record is a bounded binary-safe capture: data must be exact
+// base64 of exactly capturedBytes, and the truncation flag must agree with
+// the byte counts. An erasure by retention is the same shape with
+// capturedBytes 0, so no raw cause ever travels with the record.
+interface ShellOutputFields {
+	readonly data: string;
+	readonly capturedBytes: number;
+	readonly totalBytes: number;
+	readonly truncated: boolean;
+}
 
 export const ShellOutputSchema = Schema.Struct({
 	encoding: Schema.Literal("base64"),
-	data: Schema.String,
+	data: Schema.String.check(
+		Schema.isMaxLength(1024 * 1024),
+		Schema.makeFilter((value: string) => BASE64_PATTERN.test(value) && value.length % 4 === 0),
+	),
 	capturedBytes: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
 	totalBytes: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
 	truncated: Schema.Boolean,
-});
+}).check(
+	Schema.makeFilter((value: ShellOutputFields) => {
+		if (value.capturedBytes > value.totalBytes) return false;
+		if (value.truncated !== value.totalBytes > value.capturedBytes) return false;
+		return Buffer.from(value.data, "base64").length === value.capturedBytes;
+	}),
+);
+
+// The closed v1 terminal taxonomy: every admitted execution reaches exactly
+// one of these branches, and a branch is a stable typed fact, never prose.
+export const ShellStatusSchema = Schema.Union([
+	Schema.Struct({
+		_tag: Schema.Literal("exited"),
+		exitCode: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(255)),
+	}),
+	Schema.Struct({
+		_tag: Schema.Literal("timed_out"),
+		timeoutMs: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+	}),
+	Schema.Struct({
+		_tag: Schema.Literal("cancelled"),
+		reason: Schema.Literals(["caller", "shutdown"] as const),
+	}),
+	Schema.Struct({
+		_tag: Schema.Literal("budget_exhausted"),
+		limit: Schema.Literals(["time", "output", "memory"] as const),
+	}),
+	Schema.Struct({
+		_tag: Schema.Literal("failed"),
+		code: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(64)),
+	}),
+]);
+export type ShellStatus = typeof ShellStatusSchema.Type;
 
 export const ShellTerminalResultSchema = Schema.Struct({
 	schemaVersion: Schema.Literal(1),
 	executionId: ShellExecutionIdSchema,
 	mode: Schema.Literal("virtual"),
 	profileId: Schema.Literal("virtual-tracer-v1"),
-	started: Schema.Literal(true),
+	started: Schema.Boolean,
 	queueDurationBucket: ShellDurationBucketSchema,
 	runtimeDurationBucket: ShellDurationBucketSchema,
 	stdout: ShellOutputSchema,
 	stderr: ShellOutputSchema,
 	sensitivity: Schema.Literal("untrusted_output"),
-	sideEffectsMayHaveOccurred: Schema.Literal(false),
+	sideEffectsMayHaveOccurred: Schema.Boolean,
 	cleanup: Schema.Literal("not_needed"),
-	virtualState: Schema.Struct({ disposition: Schema.Literal("unchanged") }),
-	status: Schema.Struct({
-		_tag: Schema.Literal("exited"),
-		exitCode: Schema.Literal(0),
+	virtualState: Schema.Struct({
+		disposition: Schema.Literals(["unchanged", "committed", "rolled_back"] as const),
 	}),
+	status: ShellStatusSchema,
 });
 export type ShellTerminalResult = typeof ShellTerminalResultSchema.Type;
+export type ShellOutput = typeof ShellOutputSchema.Type;

@@ -6,6 +6,9 @@ import {
 	AgentResultSchema,
 	AgentSpawnRequestSchema,
 	AgentWaitRequestSchema,
+	isShellOperation,
+	ShellAttachRequestSchema,
+	ShellCancelRequestSchema,
 	ShellExecutionHandleDataSchema,
 	ShellTerminalResultSchema,
 	ShellWaitRequestSchema,
@@ -19,7 +22,9 @@ import {
 } from "./domain.js";
 import type { WorldRuntime } from "./runtime.js";
 import {
+	attachShellExecution,
 	cancelAgent,
+	cancelShellExecution,
 	executeVirtualShell,
 	searchWeb,
 	spawnAgent,
@@ -34,7 +39,7 @@ export interface WorldBridgeOptions {
 }
 
 const invalidRequest = (operation: WorldOperation): WorldError =>
-	operation === "shell.virtual.exec" || operation === "shell.wait"
+	isShellOperation(operation)
 		? {
 				_tag: "ShellInvalidRequest",
 				code: "SHELL_INVALID_REQUEST",
@@ -140,6 +145,16 @@ export const createWorldHost = (options: WorldBridgeOptions): { readonly handler
 			const request = decode(ShellWaitRequestSchema, payload.request, "shell.wait", true);
 			const result = await options.runtime.runPromise(waitForShellExecution(subject, request), { signal });
 			return decode(ShellTerminalResultSchema, result, "shell.wait");
+		}),
+		"world.shell.cancel": handler(options, "shell.cancel", async (payload, subject, signal) => {
+			const request = decode(ShellCancelRequestSchema, payload.request, "shell.cancel", true);
+			await options.runtime.runPromise(cancelShellExecution(subject, request), { signal });
+			return {};
+		}),
+		"world.shell.attach": handler(options, "shell.attach", async (payload, subject, signal) => {
+			const request = decode(ShellAttachRequestSchema, payload.request, "shell.attach", true);
+			const result = await options.runtime.runPromise(attachShellExecution(subject, request), { signal });
+			return decode(ShellExecutionHandleDataSchema, result, "shell.attach");
 		}),
 	},
 });

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { Effect } from "effect";
 import { EngineManager } from "../src/engine/index.js";
 import { createWorldHost } from "../src/world/bridge.js";
-import { makeDeterministicShell } from "../src/world/deterministic-shell.js";
+import { type DeterministicShellOptions, makeDeterministicShell } from "../src/world/deterministic-shell.js";
 import type { WorldOperation } from "../src/world/domain.js";
 import { makeWorldRuntime, type WorldRuntime } from "../src/world/runtime.js";
 import type { AuthorityService } from "../src/world/services.js";
@@ -29,6 +29,7 @@ const harness = (
 		waitDelayMs?: number;
 		allowedOperations?: readonly WorldOperation[];
 		authority?: AuthorityService;
+		shellOptions?: DeterministicShellOptions;
 	} = {},
 ) => {
 	const agents = makeDeterministicAgents({
@@ -36,7 +37,7 @@ const harness = (
 		waitDelayMs: options.waitDelayMs,
 	});
 	const web = makeDeterministicWeb();
-	const shell = makeDeterministicShell();
+	const shell = makeDeterministicShell(options.shellOptions);
 	const runtime = makeWorldRuntime({
 		agents: agents.service,
 		web: web.service,
@@ -77,17 +78,19 @@ describe("World evaluator bridge", () => {
 				"let durableShellExecutionId = shellExecution.executionId;",
 				'const worker = await world.agents.spawn("alpha");',
 				'const [terminal, agent, search] = await Promise.all([shellExecution.wait(), worker.wait(), world.web.search("Effect bridge")]);',
-				"({ handle: [shellExecution.id === shellExecution.executionId, typeof shellExecution.wait], terminal, agent: agent.output, search: search.text })",
+				"({ sameId: shellExecution.id === shellExecution.executionId, cancel: typeof shellExecution.cancel, sameTerminalId: terminal.executionId === shellExecution.executionId, profile: terminal.profileId, status: terminal.status._tag, agent: agent.output, search: search.text })",
 			].join("\n"),
 			{ cellId: "shell-cell" },
 		);
 		expect(result.status).toBe("ok");
-		expect(result.result).toContain("shell-execution-test-1");
-		expect(result.result).toContain("virtual-tracer-v1");
-		expect(result.result).toContain("exited");
+		expect(result.result).toContain("sameId: true");
+		expect(result.result).toContain('cancel: "function"');
+		expect(result.result).toContain("sameTerminalId: true");
+		expect(result.result).toContain('profile: "virtual-tracer-v1"');
+		expect(result.result).toContain('status: "exited"');
 		expect(result.result).toContain("A");
 		expect(result.result).toContain("result: Effect bridge");
-		expect(shell.events.map((event) => event._tag)).toEqual(["admitted", "waited"]);
+		expect(shell.events.map((event) => event._tag)).toEqual(["admitted", "settled", "waited"]);
 		expect(agents.events.map((event) => event._tag)).toEqual(["spawned", "waited"]);
 		expect(web.queries).toEqual(["Effect bridge"]);
 		expect(authorized).toEqual([
@@ -207,9 +210,120 @@ describe("World evaluator bridge", () => {
 		const restored = await secondEngine.restoreState();
 		expect(restored?.restored).toEqual(expect.arrayContaining(["durableAgentId", "durableShellExecutionId", "plain"]));
 		expect(restored?.restored).not.toEqual(expect.arrayContaining(["worker", "shellExecution"]));
+		// The durable ID crosses the snapshot; the live handle does not. Exact-ID
+		// attach reconstitutes the handle in the new generation.
 		const live = await secondEngine.execute(
-			'const probe = await world.web.search("after restart"); const nextShell = await world.shell.virtual.exec({ script: "after restart" }); String(plain.n) + ":" + durableShellExecutionId + ":" + typeof world.shell.virtual.exec + ":" + (await nextShell.wait()).mode + ":" + probe.text',
+			'const probe = await world.web.search("after restart"); const recovered = await world.shell.attach({ executionId: durableShellExecutionId }); const nextShell = await world.shell.virtual.exec({ script: "after restart" }); String(plain.n) + ":" + (await recovered.wait()).mode + ":" + (await nextShell.wait()).mode + ":" + typeof world.shell.wait + ":" + probe.text',
 		);
-		expect(live.result).toContain("7:shell-execution-test-1:function:virtual:result: after restart");
+		expect(live.result).toContain("7:virtual:virtual:function:result: after restart");
+	});
+
+	test("a timed-out wait withdraws observation and a later wait converges on the terminal result", async () => {
+		const { engine } = harness({ shellOptions: { executionMs: 120 } });
+		const admission = await engine.execute(
+			'const execution = await world.shell.virtual.exec({ script: "slow tracer" }); execution.executionId',
+		);
+		expect(admission.status).toBe("ok");
+		const result = await engine.execute(
+			"let timeoutCode; try { await execution.wait({ timeoutMs: 15 }); } catch (error) { timeoutCode = error.code; }\n" +
+				"const terminal = await execution.wait();\n" +
+				"({ timeoutCode, status: terminal.status._tag, started: terminal.started, id: terminal.executionId === execution.executionId })",
+		);
+		expect(result.status).toBe("ok");
+		expect(result.result).toContain('timeoutCode: "SHELL_WAIT_TIMEOUT"');
+		expect(result.result).toContain('status: "exited"');
+		expect(result.result).toContain("id: true");
+	});
+
+	test("awaited repeated cancellations and waits converge on the identical retained record", async () => {
+		const { engine } = harness({ shellOptions: { executionMs: 120 } });
+		await engine.execute(
+			'const execution = await world.shell.virtual.exec({ script: "cancel tracer" }); execution.executionId',
+		);
+		const result = await engine.execute(
+			"await execution.cancel();\n" +
+				"await execution.cancel();\n" +
+				"const first = await execution.wait();\n" +
+				"const second = await execution.wait();\n" +
+				"const viaWorld = await world.shell.wait({ executionId: execution.executionId });\n" +
+				"({ branch: first.status._tag, reason: first.status.reason, identical: JSON.stringify(first) === JSON.stringify(second) && JSON.stringify(first) === JSON.stringify(viaWorld) })",
+		);
+		expect(result.status).toBe("ok");
+		expect(result.result).toContain('branch: "cancelled"');
+		expect(result.result).toContain('reason: "caller"');
+		expect(result.result).toContain("identical: true");
+	});
+
+	test("unknown IDs fail identically across wait, cancel, and attach", async () => {
+		const { engine } = harness();
+		const result = await engine.execute(
+			"const probes = {};\n" +
+				'for (const operation of ["wait", "cancel", "attach"]) {\n' +
+				"	let first, second;\n" +
+				'	try { await world.shell[operation]({ executionId: "unknown-one" }); } catch (error) { first = [error.code, error.message, error.operation]; }\n' +
+				'	try { await world.shell[operation]({ executionId: "unknown-two" }); } catch (error) { second = [error.code, error.message, error.operation]; }\n' +
+				"	probes[operation] = JSON.stringify(first) === JSON.stringify(second) ? first.join('|') : 'MISMATCH';\n" +
+				"}\n" +
+				"probes",
+		);
+		expect(result.status).toBe("ok");
+		expect(result.result).toContain('wait: "SHELL_EXECUTION_NOT_FOUND|shell execution was not found|shell.wait"');
+		expect(result.result).toContain('cancel: "SHELL_EXECUTION_NOT_FOUND|shell execution was not found|shell.cancel"');
+		expect(result.result).toContain('attach: "SHELL_EXECUTION_NOT_FOUND|shell execution was not found|shell.attach"');
+	});
+
+	test("expired executions become indistinguishable from unknown ones after their retention window", async () => {
+		const { engine } = harness({ shellOptions: { expireAfterMs: 40 } });
+		const result = await engine.execute(
+			'const execution = await world.shell.virtual.exec({ script: "expires" });\n' +
+				"const settled = await execution.wait();\n" +
+				"await new Promise((resolve) => setTimeout(resolve, 80));\n" +
+				"let expiredWait, expiredAttach;\n" +
+				"try { await world.shell.wait({ executionId: execution.executionId }); } catch (error) { expiredWait = error.code; }\n" +
+				"try { await world.shell.attach({ executionId: execution.executionId }); } catch (error) { expiredAttach = error.code; }\n" +
+				"({ settled: settled.status._tag, expiredWait, expiredAttach })",
+		);
+		expect(result.status).toBe("ok");
+		expect(result.result).toContain('settled: "exited"');
+		expect(result.result).toContain('expiredWait: "SHELL_EXECUTION_NOT_FOUND"');
+		expect(result.result).toContain('expiredAttach: "SHELL_EXECUTION_NOT_FOUND"');
+	});
+
+	test("the shell surface has no list, search, status, or retry API", async () => {
+		const { engine } = harness();
+		const result = await engine.execute(
+			"({ list: world.shell.list, search: world.shell.search, status: world.shell.status, retry: world.shell.retry, exec: typeof world.shell.virtual.exec, wait: typeof world.shell.wait, cancel: typeof world.shell.cancel, attach: typeof world.shell.attach })",
+		);
+		expect(result.status).toBe("ok");
+		expect(result.result).toContain("list: undefined");
+		expect(result.result).toContain("search: undefined");
+		expect(result.result).toContain("status: undefined");
+		expect(result.result).toContain("retry: undefined");
+		expect(result.result).toContain('exec: "function"');
+		expect(result.result).toContain('wait: "function"');
+		expect(result.result).toContain('cancel: "function"');
+		expect(result.result).toContain('attach: "function"');
+	});
+
+	test("retention erases output before metadata through the public wait", async () => {
+		const { engine } = harness({
+			shellOptions: {
+				outputCharsCap: 100,
+				outcome: () => ({ _tag: "exited", exitCode: 0, stdoutBytes: 500 }),
+			},
+		});
+		const result = await engine.execute(
+			'const execution = await world.shell.virtual.exec({ script: "big output" });\n' +
+				"const first = await execution.wait();\n" +
+				"const second = await execution.wait();\n" +
+				"({ captured: first.stdout.capturedBytes, total: first.stdout.totalBytes, truncated: first.stdout.truncated, data: first.stdout.data, identical: JSON.stringify(first) === JSON.stringify(second), status: first.status._tag })",
+		);
+		expect(result.status).toBe("ok");
+		expect(result.result).toContain("captured: 0");
+		expect(result.result).toContain("total: 500");
+		expect(result.result).toContain("truncated: true");
+		expect(result.result).toContain('data: ""');
+		expect(result.result).toContain("identical: true");
+		expect(result.result).toContain('status: "exited"');
 	});
 });

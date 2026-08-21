@@ -198,14 +198,22 @@ contain closures and are intentionally reported as unserialisable; persist plain
 AgentId or ShellExecutionId values only, without treating either ID as a live
 handle.
 
-The first `world.shell.virtual.exec` slice is intentionally a non-executing
-contract tracer. The bridge strictly decodes the schema-v1 script request, the
-host reconstructs the subject before authorization, and a session-owned
-deterministic adapter admits an opaque execution ID. `wait()` returns one frozen
-success record under the explicit `virtual-tracer-v1` profile. This proves the
-capability path without pretending Host or Virtual commands ran; real just-bash
-execution, cancellation, attachment, retention, and the full terminal taxonomy
-remain separate implementation slices.
+The `world.shell` slice is intentionally a non-executing contract tracer. The
+bridge strictly decodes the schema-v1 script request, the host reconstructs the
+subject before authorization, and a session-owned deterministic adapter admits
+an opaque execution ID under the explicit `virtual-tracer-v1` profile. The
+public lifecycle is wait (with an optional observation timeout that withdraws
+without cancelling), idempotent cancel, and exact-ID attach; every admitted
+execution reaches exactly one closed v1 terminal branch (exited, timed_out,
+cancelled, budget_exhausted, or failed) with bounded base64 stdout/stderr
+captures. Retention erases output before metadata under session, time, and
+payload caps — a result captured before erasure stays with its holder, while
+later waits observe the erased record — and every refusal of wait, cancel, or
+attach is one indistinguishable not-found, so unknown, foreign, and expired
+IDs cannot be enumerated. There is deliberately no list, search, status, or retry surface.
+This proves the capability path without pretending Host or Virtual commands
+ran; real just-bash execution and the Virtual Environment remain separate
+implementation slices.
 
 ### World traces semantics, never payloads
 

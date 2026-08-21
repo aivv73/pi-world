@@ -110,7 +110,7 @@ const WORLD_GUIDANCE = [
 	"",
 	"`await world.web.search(query)` runs hidden Codex web search through the host's current model/auth context. `web_run` is not a model-visible tool.",
 	"",
-	"`await world.shell.virtual.exec({ script })` currently traces Virtual Shell admission through the deterministic contract adapter and returns `{ id, executionId, wait() }`. The tracer deliberately executes nothing; real Virtual execution arrives with the ambient-free adapter. `wait()` returns its immutable schema-v1 terminal record.",
+	"`await world.shell.virtual.exec({ script })` currently traces Virtual Shell admission through the deterministic contract adapter and returns `{ id, executionId, wait(options?), cancel() }`. The tracer deliberately executes nothing; real Virtual execution arrives with the ambient-free adapter. `wait()` returns its immutable schema-v1 terminal record (exited, timed_out, cancelled, budget_exhausted, or failed) and `wait({ timeoutMs })` withdraws the observation without cancelling. `world.shell.cancel({ executionId })` is idempotent; `world.shell.attach({ executionId })` reconstitutes the handle from a durable ID. There is no shell list/search/status/retry API, and unknown, foreign, and expired IDs fail identically.",
 	"",
 	"World handles are live closures and do not survive evaluator restart or session resume. Plain IDs and terminal result data may be retained, but do not assume an old execution can be resumed.",
 ].join("\n");

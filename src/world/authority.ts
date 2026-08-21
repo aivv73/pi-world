@@ -1,5 +1,5 @@
 import { Effect, Layer } from "effect";
-import type { WorldOperation, WorldSubject } from "./domain.js";
+import { isShellOperation, type WorldOperation, type WorldSubject } from "./domain.js";
 import { Authority, type AuthorityService, type ShellAuthorityDenied, type WorldDenied } from "./services.js";
 
 export const DEFAULT_MAX_DEPTH = 2;
@@ -10,6 +10,8 @@ export const DEFAULT_ALLOWED_OPERATIONS: readonly WorldOperation[] = [
 	"web.search",
 	"shell.virtual.exec",
 	"shell.wait",
+	"shell.cancel",
+	"shell.attach",
 ];
 
 export interface StaticAuthorityOptions {
@@ -18,7 +20,7 @@ export interface StaticAuthorityOptions {
 }
 
 const denied = (operation: WorldOperation, message: string): WorldDenied | ShellAuthorityDenied =>
-	operation === "shell.virtual.exec" || operation === "shell.wait"
+	isShellOperation(operation)
 		? { _tag: "ShellAuthorityDenied", code: "SHELL_AUTHORITY_DENIED", operation, message }
 		: { _tag: "WorldDenied", code: "WORLD_ACCESS_DENIED", operation, message };
 

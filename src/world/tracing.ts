@@ -11,6 +11,8 @@ export const WORLD_SPANS = {
 	agentCancel: "world.agents.cancel",
 	shellVirtualExec: "world.shell.virtual.exec",
 	shellWait: "world.shell.wait",
+	shellCancel: "world.shell.cancel",
+	shellAttach: "world.shell.attach",
 } as const;
 
 export const WORLD_TRACE_ATTRIBUTE_KEYS = [
@@ -34,6 +36,8 @@ const operations = new Set([
 	"web.search",
 	"shell.virtual.exec",
 	"shell.wait",
+	"shell.cancel",
+	"shell.attach",
 ]);
 const adapters = new Set(["pi-process", "codex-conversion", "deterministic-shell"]);
 const outcomes = new Set([
@@ -59,6 +63,7 @@ const errorCodes = new Set([
 	"SHELL_INVALID_REQUEST",
 	"SHELL_AUTHORITY_DENIED",
 	"SHELL_EXECUTION_NOT_FOUND",
+	"SHELL_WAIT_TIMEOUT",
 ]);
 const cancelReasons = new Set(["caller", "execution_timeout", "shutdown"]);
 const opaqueId = /^[a-f0-9]{16}$/;

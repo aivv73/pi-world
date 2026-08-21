@@ -67,10 +67,13 @@ and `cancel()` awaits bounded cleanup. `spawnMany()` admits a fan-out before
 anything is awaited. Legacy `rlm.run` remains available for compatibility.
 
 **Virtual Shell as a traced World call.** `world.shell.virtual.exec({ script })`
-now exercises the complete guest-to-authority-to-session-runtime path and returns
-a live handle whose `wait()` yields a schema-v1 terminal record. This first
-adapter is deliberately deterministic and executes nothing; the ambient-free
-Virtual Environment replaces it in the next implementation slice.
+exercises the complete guest-to-authority-to-session-runtime path and returns a
+live handle: `wait()` yields the immutable schema-v1 terminal record (exited,
+timed_out, cancelled, budget_exhausted, or failed), `wait({ timeoutMs })`
+withdraws the observation without cancelling, `cancel()` is idempotent, and
+`world.shell.attach({ executionId })` reconstitutes the handle from a durable
+ID. The first adapter is a deterministic contract tracer that executes nothing;
+the ambient-free Virtual Environment replaces it in the next implementation slice.
 
 **Cancellation that costs one cell.** Interrupting a running cell leaves the
 namespace intact, and the cancelled cell cannot keep writing to it afterwards.
