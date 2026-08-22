@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { Schema } from "effect";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Effect, Schema } from "effect";
+
 import { DEFAULT_MAX_DEPTH } from "../src/world/authority.js";
 import { type DeterministicShellOptions, makeDeterministicShell } from "../src/world/deterministic-shell.js";
 import {
@@ -8,10 +12,12 @@ import {
 	AgentWaitRequestSchema,
 	makeAgentId,
 	makeAttemptId,
+	makePrincipalId,
 	makeShellExecutionId,
 	ShellAttachRequestSchema,
 	ShellCancelRequestSchema,
 	ShellExecutionIdSchema,
+	type ShellOperation,
 	ShellOutputSchema,
 	type ShellStatus,
 	ShellStatusSchema,
@@ -34,6 +40,16 @@ import {
 	waitForAgent,
 	waitForShellExecution,
 } from "../src/world/services.js";
+import {
+	DEFAULT_VIRTUAL_PROFILES,
+	makeFileShellAudit,
+	makeGrantEnforcedTracer,
+	makeProfileRegistry,
+	makeShellGrants,
+	type PolicyProfile,
+	type ShellAuditService,
+	VIRTUAL_TRACER_PROFILE,
+} from "../src/world/shell-authority.js";
 import { makeDeterministicAgents, makeDeterministicWeb } from "../src/world/test-adapters.js";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -50,7 +66,12 @@ afterEach(async () => {
 	await Promise.all(runtimes.splice(0).map((value) => value.dispose()));
 });
 
-const subject = { sessionId: "session-test", cellId: "cell-test", depth: 0 };
+const subject = {
+	sessionId: "session-test",
+	cellId: "cell-test",
+	depth: 0,
+	principalId: makePrincipalId("principal-session-test"),
+};
 
 // The bridge will receive unknown JSON, so boundary schemas must reject malformed
 // input before an adapter sees it and preserve distinct domain identities.
@@ -308,6 +329,503 @@ test("the static authority default is the reviewed recursion bound", () => {
 	expect(DEFAULT_MAX_DEPTH).toBe(2);
 });
 
+describe("Shell principals, grants, and mandatory audit", () => {
+	const tempDirs: string[] = [];
+	const tempFile = (name: string) => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-world-grants-"));
+		tempDirs.push(dir);
+		return join(dir, name);
+	};
+
+	afterEach(() => {
+		for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+	});
+
+	const narrowProfile = (): PolicyProfile => ({
+		profileId: "virtual-tracer-narrow-v1",
+		policyVersion: 1,
+		mode: "virtual",
+		operations: ["shell.virtual.exec", "shell.wait", "shell.cancel"],
+		network: "none",
+		environment: "none",
+		root: "virtual",
+		ceilings: { executionTimeoutMs: 1_000, outputBytes: 1_024, concurrentExecutions: 2 },
+		drainOnRevocation: false,
+	});
+	const broadProfile = (): PolicyProfile => ({
+		...VIRTUAL_TRACER_PROFILE,
+		profileId: "virtual-tracer-broad-v1",
+		ceilings: { executionTimeoutMs: 600_000, outputBytes: 10_485_760, concurrentExecutions: 64 },
+	});
+
+	const makeGovernedWorld = (
+		options: {
+			profiles?: readonly PolicyProfile[];
+			servedProfile?: PolicyProfile;
+			rootProfiles?: readonly string[];
+			rootOperations?: readonly ShellOperation[];
+			audit?: ShellAuditService;
+			tracerOptions?: DeterministicShellOptions;
+		} = {},
+	) => {
+		const registry = makeProfileRegistry(options.profiles ?? DEFAULT_VIRTUAL_PROFILES);
+		const grants = makeShellGrants({
+			registry,
+			...(options.rootProfiles === undefined ? {} : { rootProfiles: options.rootProfiles }),
+			...(options.rootOperations === undefined ? {} : { rootOperations: options.rootOperations }),
+		});
+		// The session root principal is the one the shared test subject carries.
+		const principalId = subject.principalId;
+		const rootGrant = grants.issueRoot({
+			principalId,
+			sessionId: subject.sessionId,
+			depth: 0,
+			lineage: [],
+		});
+		const audit = options.audit ?? makeFileShellAudit({ path: tempFile("shell-audit.jsonl") });
+		const governed = makeGrantEnforcedTracer({
+			grants,
+			audit,
+			profile: options.servedProfile ?? VIRTUAL_TRACER_PROFILE,
+			tracerOptions: options.tracerOptions,
+		});
+		const world = makeWorldRuntime({
+			agents: makeDeterministicAgents().service,
+			web: makeDeterministicWeb().service,
+			shell: governed.service,
+			grants,
+		});
+		runtimes.push(world);
+		return { grants, principalId, rootGrant, governed, world };
+	};
+
+	const childSubject = (base: {
+		sessionId: string;
+		depth: number;
+		principalId: ReturnType<typeof makePrincipalId>;
+	}) => ({
+		sessionId: base.sessionId,
+		cellId: "child-cell",
+		depth: base.depth + 1,
+		principalId: base.principalId,
+	});
+
+	test("a principal without an active grant is denied admission with no side effect", async () => {
+		const { governed, world } = makeGovernedWorld();
+		const stranger = { ...subject, principalId: makePrincipalId("principal-stranger") };
+		await expect(
+			world.runPromise(executeVirtualShell(stranger, { schemaVersion: 1, script: "denied" })),
+		).rejects.toMatchObject({
+			_tag: "ShellAuthorityDenied",
+			code: "SHELL_AUTHORITY_DENIED",
+			operation: "shell.virtual.exec",
+		});
+		expect(governed.events).toHaveLength(0);
+		expect(governed.pendingCount()).toBe(0);
+	});
+
+	test("the default grant is least-authority virtual-only and omitted operations deny", async () => {
+		const { governed, world } = makeGovernedWorld({
+			rootOperations: ["shell.virtual.exec", "shell.wait", "shell.attach"],
+		});
+		const handle = await world.runPromise(executeVirtualShell(subject, { schemaVersion: 1, script: "no cancel" }));
+
+		const unknownId = makeShellExecutionId("00000000-0000-0000-0000-000000000000");
+		const cancelDenied = (await world
+			.runPromise(cancelShellExecution(subject, { executionId: handle.executionId }))
+			.catch((error) => error)) as object;
+		const unknownCancel = (await world
+			.runPromise(cancelShellExecution(subject, { executionId: unknownId }))
+			.catch((error) => error)) as object;
+		expect(cancelDenied).toEqual(unknownCancel);
+		// Omitted operations deny without enumerating; omitted profiles never
+		// admit. Everything the grant does list still works.
+		const terminal = await world.runPromise(waitForShellExecution(subject, { executionId: handle.executionId }));
+		expect(terminal.status._tag).toBe("exited");
+		expect(governed.events.some((event) => event._tag === "cancelled")).toBe(false);
+	});
+
+	test("attenuation proves every component narrower or denies", async () => {
+		const { grants, principalId, world } = makeGovernedWorld({
+			profiles: [...DEFAULT_VIRTUAL_PROFILES, narrowProfile(), broadProfile()],
+		});
+
+		const childGrant = await world.runPromise(
+			spawnAgentAttenuationProbe(grants, principalId, "virtual-tracer-narrow-v1"),
+		);
+		expect(childGrant.profiles).toEqual(["virtual-tracer-narrow-v1"]);
+		expect(childGrant.operations.every((operation) => VIRTUAL_TRACER_PROFILE.operations.includes(operation))).toBe(
+			true,
+		);
+		expect(childGrant.lineage).toEqual([principalId]);
+
+		await expect(
+			world.runPromise(spawnAgentAttenuationProbe(grants, principalId, "virtual-tracer-broad-v1")),
+		).rejects.toMatchObject({
+			_tag: "WorldDenied",
+			code: "WORLD_ACCESS_DENIED",
+			operation: "agents.spawn",
+		});
+		await expect(
+			world.runPromise(spawnAgentAttenuationProbe(grants, principalId, "missing-profile")),
+		).rejects.toMatchObject({
+			_tag: "WorldDenied",
+		});
+		// The narrowed child cannot delegate back up to the broader profile.
+		await expect(
+			world.runPromise(spawnAgentAttenuationProbe(grants, childGrant.principalId, "virtual-tracer-v1")),
+		).rejects.toMatchObject({ _tag: "WorldDenied" });
+	});
+
+	test("supervision works for the owner and granted ancestors only", async () => {
+		const { grants, principalId, world } = makeGovernedWorld({ tracerOptions: { executionMs: 40 } });
+		const childGrant = await world.runPromise(
+			spawnAgentAttenuationProbe(grants, principalId, VIRTUAL_TRACER_PROFILE.profileId),
+		);
+		const siblingGrant = await world.runPromise(
+			spawnAgentAttenuationProbe(grants, principalId, VIRTUAL_TRACER_PROFILE.profileId),
+		);
+		const child = childSubject({ sessionId: subject.sessionId, depth: 0, principalId: childGrant.principalId });
+		const sibling = childSubject({ sessionId: subject.sessionId, depth: 0, principalId: siblingGrant.principalId });
+
+		const rootExecution = await world.runPromise(
+			executeVirtualShell(subject, { schemaVersion: 1, script: "root work" }),
+		);
+		const childExecution = await world.runPromise(
+			executeVirtualShell(child, { schemaVersion: 1, script: "child work" }),
+		);
+
+		// A descendant of the owner is not a supervisor of the owner's work.
+		const childSeesRoot = (await world
+			.runPromise(waitForShellExecution(child, { executionId: rootExecution.executionId, timeoutMs: 200 }))
+			.catch((error) => error)) as object;
+		expect(childSeesRoot).toMatchObject({ _tag: "ShellExecutionNotFound" });
+		// Siblings deny identically.
+		const siblingSeesChild = (await world
+			.runPromise(waitForShellExecution(sibling, { executionId: childExecution.executionId }))
+			.catch((error) => error)) as object;
+		expect(siblingSeesChild).toEqual(childSeesRoot);
+		// The granted ancestor supervises the descendant's work.
+		const rootWaitsChild = await world.runPromise(
+			waitForShellExecution(subject, { executionId: childExecution.executionId }),
+		);
+		expect(rootWaitsChild.status._tag).toBe("exited");
+		// And the owner always supervises its own execution.
+		const ownerWaitsRoot = await world.runPromise(
+			waitForShellExecution(subject, { executionId: rootExecution.executionId }),
+		);
+		expect(ownerWaitsRoot.status._tag).toBe("exited");
+	});
+
+	test("revocation blocks admission and delegation, cascades, and cancels active work", async () => {
+		const { grants, rootGrant, governed, world } = makeGovernedWorld({ tracerOptions: { executionMs: 150 } });
+		const childGrant = await world.runPromise(
+			spawnAgentAttenuationProbe(grants, principalIdOf(rootGrant), VIRTUAL_TRACER_PROFILE.profileId),
+		);
+		const child = childSubject({ sessionId: subject.sessionId, depth: 0, principalId: childGrant.principalId });
+
+		const rootExecution = await world.runPromise(
+			executeVirtualShell(subject, { schemaVersion: 1, script: "root pending" }),
+		);
+		await world.runPromise(executeVirtualShell(child, { schemaVersion: 1, script: "child pending" }));
+
+		const revoked = grants.revoke(rootGrant.grantId);
+		expect(revoked.length).toBeGreaterThanOrEqual(2);
+
+		// Active work under the revoked subtree is cancelled (asynchronously
+		// through the inner adapter).
+		for (let attempt = 0; attempt < 100 && governed.pendingCount() > 0; attempt += 1) {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		expect(governed.pendingCount()).toBe(0);
+		// Admission and delegation are blocked for every revoked principal.
+		await expect(
+			world.runPromise(executeVirtualShell(subject, { schemaVersion: 1, script: "after revoke" })),
+		).rejects.toMatchObject({
+			code: "SHELL_AUTHORITY_DENIED",
+		});
+		await expect(
+			world.runPromise(executeVirtualShell(child, { schemaVersion: 1, script: "child after revoke" })),
+		).rejects.toMatchObject({
+			code: "SHELL_AUTHORITY_DENIED",
+		});
+		await expect(
+			world.runPromise(spawnAgentAttenuationProbe(grants, principalIdOf(rootGrant), VIRTUAL_TRACER_PROFILE.profileId)),
+		).rejects.toMatchObject({
+			_tag: "WorldDenied",
+		});
+		// Attachment is blocked for the revoked owner, indistinguishably.
+		await expect(
+			world.runPromise(attachShellExecution(subject, { executionId: rootExecution.executionId })),
+		).rejects.toMatchObject({
+			_tag: "ShellExecutionNotFound",
+		});
+		expect(governed.events.filter((event) => event._tag === "cancelled")).toHaveLength(2);
+	});
+
+	test("a predefined safe profile permits bounded drain instead of cancellation", async () => {
+		const drainProfile: PolicyProfile = { ...VIRTUAL_TRACER_PROFILE, drainOnRevocation: true };
+		const { grants, rootGrant, governed, world } = makeGovernedWorld({
+			profiles: [drainProfile],
+			servedProfile: drainProfile,
+			rootProfiles: ["virtual-tracer-v1"],
+			tracerOptions: { executionMs: 80 },
+		});
+		const handle = await world.runPromise(executeVirtualShell(subject, { schemaVersion: 1, script: "drains" }));
+		grants.revoke(rootGrant.grantId);
+
+		const terminal = await world.runPromise(waitForShellExecution(subject, { executionId: handle.executionId }));
+		expect(terminal.status).toEqual({ _tag: "exited", exitCode: 0 });
+		expect(governed.pendingCount()).toBe(0);
+	});
+
+	test("admission audit failure returns the stable unavailable error and creates no side effect", async () => {
+		const failingAudit: ShellAuditService = {
+			admit: () => {
+				throw new Error("audit disk full");
+			},
+			terminal: () => {},
+			revocation: () => {},
+			healthy: () => true,
+		};
+		const { governed, world } = makeGovernedWorld({ audit: failingAudit });
+		await expect(
+			world.runPromise(executeVirtualShell(subject, { schemaVersion: 1, script: "unauditable" })),
+		).rejects.toMatchObject({
+			_tag: "ShellUnavailableError",
+			code: "SHELL_UNAVAILABLE",
+			operation: "shell.virtual.exec",
+		});
+		expect(governed.events).toHaveLength(0);
+		expect(governed.pendingCount()).toBe(0);
+	});
+
+	test("terminal audit failure marks the service unhealthy without rewriting results", async () => {
+		let unhealthy = false;
+		const admissions: string[] = [];
+		const audit: ShellAuditService = {
+			admit: (entry) => {
+				if (unhealthy) throw new Error("audit outage");
+				admissions.push(entry.operation);
+			},
+			terminal: () => {
+				// Simulates a terminal write failure: the result stays delivered,
+				// and the service refuses further admissions.
+				unhealthy = true;
+			},
+			revocation: () => {},
+			healthy: () => !unhealthy,
+		};
+		const { governed, world } = makeGovernedWorld({ audit, tracerOptions: { executionMs: 30 } });
+		const first = await world.runPromise(executeVirtualShell(subject, { schemaVersion: 1, script: "before outage" }));
+		const terminal = await world.runPromise(waitForShellExecution(subject, { executionId: first.executionId }));
+		expect(terminal.status._tag).toBe("exited");
+
+		await expect(
+			world.runPromise(executeVirtualShell(subject, { schemaVersion: 1, script: "during outage" })),
+		).rejects.toMatchObject({
+			code: "SHELL_UNAVAILABLE",
+		});
+		// Lifecycle safety actions continue during the audit outage.
+		const again = await world.runPromise(waitForShellExecution(subject, { executionId: first.executionId }));
+		expect(again.status._tag).toBe("exited");
+		const recovered = await world.runPromise(attachShellExecution(subject, { executionId: first.executionId }));
+		expect(recovered.executionId).toBe(first.executionId);
+		expect(admissions).toEqual(["shell.virtual.exec"]);
+		expect(governed.recordCount()).toBe(1);
+	});
+
+	test("the durable audit records metadata only, never script content", async () => {
+		const path = tempFile("audit.jsonl");
+		const { world } = (() => {
+			const registry = makeProfileRegistry(DEFAULT_VIRTUAL_PROFILES);
+			const grants = makeShellGrants({ registry });
+			grants.issueRoot({ principalId: subject.principalId, sessionId: subject.sessionId, depth: 0, lineage: [] });
+			const audit = makeFileShellAudit({ path });
+			const governed = makeGrantEnforcedTracer({ grants, audit, profile: VIRTUAL_TRACER_PROFILE });
+			const world = makeWorldRuntime({
+				agents: makeDeterministicAgents().service,
+				web: makeDeterministicWeb().service,
+				shell: governed.service,
+				grants,
+			});
+			runtimes.push(world);
+			return { world };
+		})();
+
+		const handle = await world.runPromise(
+			executeVirtualShell(subject, { schemaVersion: 1, script: "echo secret-canary-25 && cat /etc/shadow" }),
+		);
+		await world.runPromise(waitForShellExecution(subject, { executionId: handle.executionId }));
+
+		const lines = readFileSync(path, "utf8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as Record<string, unknown>);
+		expect(lines.map((line) => line.kind)).toEqual(["admission", "terminal"]);
+		expect(lines[0]).toMatchObject({ operation: "shell.virtual.exec", profileId: "virtual-tracer-v1" });
+		expect(lines[1]).toMatchObject({ branch: "exited", executionId: handle.executionId });
+		const exported = JSON.stringify(lines);
+		for (const canary of ["secret-canary-25", "/etc/shadow", "echo"]) {
+			expect(exported).not.toContain(canary);
+		}
+	});
+
+	test("registry profiles and the built-in profile are frozen against widening", () => {
+		const callerProfile = narrowProfile();
+		const registry = makeProfileRegistry([callerProfile]);
+		const stored = registry.lookup("virtual-tracer-narrow-v1");
+		expect(Object.isFrozen(stored)).toBe(true);
+		expect(Object.isFrozen(stored?.operations)).toBe(true);
+		expect(Object.isFrozen(stored?.ceilings)).toBe(true);
+		// Mutating the stored authority throws; mutating the caller's own
+		// object is allowed but inert because the registry stores a copy.
+		expect(() => {
+			(stored?.ceilings as { executionTimeoutMs: number }).executionTimeoutMs = 999_999;
+		}).toThrow();
+		(callerProfile.ceilings as { executionTimeoutMs: number }).executionTimeoutMs = 999_999;
+		expect(registry.lookup("virtual-tracer-narrow-v1")?.ceilings.executionTimeoutMs).toBe(1_000);
+		expect(Object.isFrozen(VIRTUAL_TRACER_PROFILE)).toBe(true);
+		expect(Object.isFrozen(VIRTUAL_TRACER_PROFILE.operations)).toBe(true);
+		expect(Object.isFrozen(VIRTUAL_TRACER_PROFILE.ceilings)).toBe(true);
+	});
+
+	test("attenuation denies a parent subject whose session differs from its grant", async () => {
+		const { grants, principalId, world } = makeGovernedWorld();
+		await expect(
+			world.runPromise(
+				Effect.gen(function* () {
+					return yield* grants.attenuate(
+						{ principalId, sessionId: "forged-session", depth: 0 },
+						VIRTUAL_TRACER_PROFILE.profileId,
+					);
+				}),
+			),
+		).rejects.toMatchObject({ _tag: "WorldDenied", code: "WORLD_ACCESS_DENIED", operation: "agents.spawn" });
+	});
+
+	test("invalid root profiles or root operations fail construction before any grant exists", () => {
+		const registry = makeProfileRegistry(DEFAULT_VIRTUAL_PROFILES);
+		expect(() => makeShellGrants({ registry, rootProfiles: ["missing-profile"] })).toThrow(/not in the registry/);
+		// The default root operations include shell.attach, which the narrow
+		// profile does not hold: a broader root must not be constructible.
+		const narrowRegistry = makeProfileRegistry([narrowProfile()]);
+		expect(() => makeShellGrants({ registry: narrowRegistry, rootProfiles: ["virtual-tracer-narrow-v1"] })).toThrow(
+			/not granted by any root profile/,
+		);
+	});
+
+	test("the served profile's ceilings bound timeout and capture regardless of adapter options", async () => {
+		const tightProfile: PolicyProfile = {
+			...VIRTUAL_TRACER_PROFILE,
+			profileId: "virtual-tight-v1",
+			ceilings: { executionTimeoutMs: 20, outputBytes: 16, concurrentExecutions: 2 },
+		};
+		const { governed, world } = makeGovernedWorld({
+			profiles: [tightProfile],
+			servedProfile: tightProfile,
+			rootProfiles: [tightProfile.profileId],
+			tracerOptions: {
+				executionMs: 200,
+				outcome: () => ({ _tag: "exited", exitCode: 0, stdoutBytes: 500 }),
+			},
+		});
+		const handle = await world.runPromise(executeVirtualShell(subject, { schemaVersion: 1, script: "tight" }));
+		const terminal = await world.runPromise(waitForShellExecution(subject, { executionId: handle.executionId }));
+		// The declared 200ms run is cut by the 20ms ceiling, and the declared
+		// 500-byte stdout is captured only within the 16-byte output ceiling.
+		expect(terminal.status).toEqual({ _tag: "timed_out", timeoutMs: 20 });
+		expect(terminal.stdout.capturedBytes).toBe(16);
+		expect(terminal.stdout.truncated).toBe(true);
+		expect(governed.pendingCount()).toBe(0);
+	});
+
+	test("the concurrency ceiling refuses admission as unavailable until capacity frees", async () => {
+		const soloProfile: PolicyProfile = {
+			...VIRTUAL_TRACER_PROFILE,
+			profileId: "virtual-solo-v1",
+			ceilings: { ...VIRTUAL_TRACER_PROFILE.ceilings, concurrentExecutions: 1 },
+		};
+		const { world } = makeGovernedWorld({
+			profiles: [soloProfile],
+			servedProfile: soloProfile,
+			rootProfiles: [soloProfile.profileId],
+			tracerOptions: { executionMs: 100 },
+		});
+		const first = await world.runPromise(executeVirtualShell(subject, { schemaVersion: 1, script: "occupying" }));
+		await expect(
+			world.runPromise(executeVirtualShell(subject, { schemaVersion: 1, script: "over capacity" })),
+		).rejects.toMatchObject({ _tag: "ShellUnavailableError", code: "SHELL_UNAVAILABLE" });
+		await world.runPromise(waitForShellExecution(subject, { executionId: first.executionId }));
+		const second = await world.runPromise(executeVirtualShell(subject, { schemaVersion: 1, script: "after free" }));
+		expect(second.executionId).toBeDefined();
+	});
+
+	test("revocation still cancels active work when the revocation audit throws", async () => {
+		const throwingAudit: ShellAuditService = {
+			admit: () => {},
+			terminal: () => {},
+			revocation: () => {
+				throw new Error("audit outage");
+			},
+			healthy: () => true,
+		};
+		const { grants, rootGrant, governed, world } = makeGovernedWorld({
+			audit: throwingAudit,
+			tracerOptions: { executionMs: 150 },
+		});
+		await world.runPromise(executeVirtualShell(subject, { schemaVersion: 1, script: "pending revoke" }));
+		expect(grants.revoke(rootGrant.grantId).length).toBeGreaterThanOrEqual(1);
+
+		for (let attempt = 0; attempt < 100 && governed.pendingCount() > 0; attempt += 1) {
+			await sleep(10);
+		}
+		expect(governed.pendingCount()).toBe(0);
+		expect(governed.events.filter((event) => event._tag === "cancelled")).toHaveLength(1);
+	});
+
+	test("a terminal audit write that throws is contained and gates admission locally", async () => {
+		const admissions: string[] = [];
+		const audit: ShellAuditService = {
+			admit: (entry) => {
+				admissions.push(entry.operation);
+			},
+			terminal: () => {
+				throw new Error("audit disk gone");
+			},
+			revocation: () => {},
+			healthy: () => true,
+		};
+		const { governed, world } = makeGovernedWorld({ audit, tracerOptions: { executionMs: 30 } });
+		const first = await world.runPromise(executeVirtualShell(subject, { schemaVersion: 1, script: "before" }));
+		// Settlement and retention still complete; the delivered result is untouched.
+		const terminal = await world.runPromise(waitForShellExecution(subject, { executionId: first.executionId }));
+		expect(terminal.status._tag).toBe("exited");
+
+		await expect(
+			world.runPromise(executeVirtualShell(subject, { schemaVersion: 1, script: "after" })),
+		).rejects.toMatchObject({ _tag: "ShellUnavailableError", code: "SHELL_UNAVAILABLE" });
+		expect(admissions).toEqual(["shell.virtual.exec"]);
+		expect(governed.recordCount()).toBe(1);
+	});
+});
+
+// Attenuation runs through the same host path a spawn uses; this probe keeps
+// the grant proof directly observable without spawning a real agent.
+const spawnAgentAttenuationProbe = (
+	grants: ReturnType<typeof makeShellGrants>,
+	parentPrincipalId: ReturnType<typeof makePrincipalId>,
+	requestedProfileId: string,
+) =>
+	Effect.gen(function* () {
+		return yield* grants.attenuate(
+			{ principalId: parentPrincipalId, sessionId: subject.sessionId, depth: 0 },
+			requestedProfileId,
+		);
+	});
+
+const principalIdOf = (grant: { readonly principalId: ReturnType<typeof makePrincipalId> }) => grant.principalId;
+
 describe("Shell execution lifecycle over the deterministic adapter", () => {
 	const makeShellWorld = (options: DeterministicShellOptions = {}) => {
 		const shell = makeDeterministicShell(options);
@@ -458,7 +976,7 @@ describe("Shell execution lifecycle over the deterministic adapter", () => {
 	test("exact-ID attach succeeds for the owner session, and every refusal is indistinguishable", async () => {
 		const { world } = makeShellWorld();
 		const handle = await world.runPromise(executeVirtualShell(subject, { schemaVersion: 1, script: "attach" }));
-		const foreign = { sessionId: "other-session", depth: 1 };
+		const foreign = { sessionId: "other-session", depth: 1, principalId: makePrincipalId("principal-other-session") };
 		const unknownId = makeShellExecutionId("00000000-0000-0000-0000-000000000000");
 
 		// Attach also recovers a handle for a pending (not yet settled) execution.
@@ -477,7 +995,12 @@ describe("Shell execution lifecycle over the deterministic adapter", () => {
 		});
 
 		// The owner session may attach from any of its cells.
-		const otherCell = { sessionId: subject.sessionId, cellId: "another-cell", depth: 0 };
+		const otherCell = {
+			sessionId: subject.sessionId,
+			cellId: "another-cell",
+			depth: 0,
+			principalId: subject.principalId,
+		};
 		const recovered = await world.runPromise(attachShellExecution(otherCell, { executionId: handle.executionId }));
 		expect(recovered.executionId).toBe(handle.executionId);
 

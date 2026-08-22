@@ -1,12 +1,22 @@
+import { join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Layer, ManagedRuntime, Tracer } from "effect";
 import type { HostRequestHandlers } from "../engine/index.js";
 import { StaticAuthorityLive } from "../world/authority.js";
 import { createWorldHost } from "../world/bridge.js";
 import { CodexConversionWebLive, type CodexWebSearchExecutor } from "../world/codex-conversion-web.js";
-import { DeterministicShellLive } from "../world/deterministic-shell.js";
+import { makePrincipalId } from "../world/domain.js";
 import { type PiChildSpawnInput, type PiChildSpec, PiProcessAgentsLive } from "../world/pi-process-agents.js";
 import type { WorldRuntime } from "../world/runtime.js";
+import { Shell, ShellGrants } from "../world/services.js";
+import {
+	DEFAULT_VIRTUAL_PROFILES,
+	makeFileShellAudit,
+	makeGrantEnforcedTracer,
+	makeProfileRegistry,
+	makeShellGrants,
+	VIRTUAL_TRACER_PROFILE,
+} from "../world/shell-authority.js";
 
 export interface SessionWorldOptions {
 	readonly cwd: string;
@@ -49,6 +59,14 @@ export class SessionWorldOwner {
 
 /** One Effect runtime and scope for one Pi session generation. */
 export const createSessionWorld = (options: SessionWorldOptions): SessionWorld => {
+	// Principal identity is host-established: one session root principal,
+	// derived from the session id, holding the least-authority Virtual grant.
+	const principalId = makePrincipalId("principal-" + options.sessionId);
+	const grants = makeShellGrants({ registry: makeProfileRegistry(DEFAULT_VIRTUAL_PROFILES) });
+	grants.issueRoot({ principalId, sessionId: options.sessionId, depth: options.depth, lineage: [] });
+	const audit = makeFileShellAudit({ path: join(options.sessionDir, "shell-audit.jsonl") });
+	const governedShell = makeGrantEnforcedTracer({ grants, audit, profile: VIRTUAL_TRACER_PROFILE });
+
 	const runtime = ManagedRuntime.make(
 		Layer.mergeAll(
 			StaticAuthorityLive({ maxDepth: options.maxDepth }),
@@ -61,13 +79,14 @@ export const createSessionWorld = (options: SessionWorldOptions): SessionWorld =
 				spawnCommand: options.spawnCommand,
 			}),
 			CodexConversionWebLive({ getContext: options.getContext, execute: options.executeWeb }),
-			DeterministicShellLive(),
+			Layer.succeed(ShellGrants)(grants),
+			Layer.succeed(Shell)(governedShell.service),
 			...(options.tracer ? [Layer.succeed(Tracer.Tracer)(options.tracer)] : []),
 		),
 	);
 	return {
 		runtime,
-		handlers: createWorldHost({ runtime, sessionId: options.sessionId, depth: options.depth }).handlers,
+		handlers: createWorldHost({ runtime, sessionId: options.sessionId, depth: options.depth, principalId }).handlers,
 		dispose: () => runtime.dispose(),
 	};
 };

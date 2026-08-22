@@ -198,10 +198,21 @@ contain closures and are intentionally reported as unserialisable; persist plain
 AgentId or ShellExecutionId values only, without treating either ID as a live
 handle.
 
-The `world.shell` slice is intentionally a non-executing contract tracer. The
-bridge strictly decodes the schema-v1 script request, the host reconstructs the
-subject before authorization, and a session-owned deterministic adapter admits
-an opaque execution ID under the explicit `virtual-tracer-v1` profile. The
+The `world.shell` slice is intentionally a non-executing contract tracer.
+Every admission walks the full governance path: the bridge strictly decodes the
+schema-v1 script request and reconstructs the subject — including the
+host-established principal — from its own session context, the grant layer
+requires an active Shell Grant naming the served `virtual-tracer-v1` profile,
+and a durable metadata-only admission audit is fsynced before any allocation.
+An audit failure returns one stable unavailable error and creates no side
+effect; a failed terminal audit marks the service unhealthy without rewriting
+results, while lifecycle safety actions continue. Child agents may name a
+narrower policy profile at spawn, and the host proves every component —
+operations, root, network and environment rules, numeric ceilings, and the
+drain exception — narrower than the caller's own grant before issuing the
+immutable child grant. Revocation cascades to descendants, blocks admission,
+attachment, and delegation, and cancels active work unless the served profile
+permits bounded drain. The
 public lifecycle is wait (with an optional observation timeout that withdraws
 without cancelling), idempotent cancel, and exact-ID attach; every admitted
 execution reaches exactly one closed v1 terminal branch (exited, timed_out,
@@ -214,6 +225,19 @@ IDs cannot be enumerated. There is deliberately no list, search, status, or retr
 This proves the capability path without pretending Host or Virtual commands
 ran; real just-bash execution and the Virtual Environment remain separate
 implementation slices.
+
+Three scope boundaries are deliberate here. Child-grant propagation ends at the
+host: attenuation is proven against the parent grant when spawn is admitted,
+but carrying the derived principal and child grant across the process boundary
+into the child's own evaluator needs a trusted transport slice, so a narrowed
+child today is constrained by the proof at admission rather than by carried
+authority inside the child process. The governed tracer owns its timers,
+records, and admission tracking, but session shutdown currently finalizes only
+the Effect runtime — a dedicated shell finalizer that cancels pending work on
+teardown belongs with the real Virtual Environment adapter, whose lifetime
+rules it will share. And revocation keeps tombstone entries in in-memory grant
+maps for the session's life: unlike execution records, they have no cap, which
+is acceptable while sessions are short-lived and worth revisiting if they grow.
 
 ### World traces semantics, never payloads
 

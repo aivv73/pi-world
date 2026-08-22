@@ -15,7 +15,7 @@ import {
 import { Shell, type ShellExecutionNotFound, type ShellService, type ShellWaitTimeoutError } from "./services.js";
 
 export type DeterministicShellEvent =
-	| { readonly _tag: "admitted"; readonly executionId: ShellExecutionId; readonly scriptPreview: string }
+	| { readonly _tag: "admitted"; readonly executionId: ShellExecutionId }
 	| { readonly _tag: "settled"; readonly executionId: ShellExecutionId; readonly branch: ShellStatus["_tag"] }
 	| { readonly _tag: "waited"; readonly executionId: ShellExecutionId; readonly timeoutMs?: number }
 	| { readonly _tag: "cancelled"; readonly executionId: ShellExecutionId }
@@ -50,14 +50,21 @@ export interface DeterministicShellOptions {
 	readonly expireAfterMs?: number;
 	/** Retention: combined stored base64 characters across retained outputs. Default 4 MiB. */
 	readonly outputCharsCap?: number;
+	/** Per-stream capture cap in bytes; a policy profile may bound this further. Default 64 KiB. */
+	readonly captureBytesCap?: number;
+	/** Host-side observer fired exactly once when an execution reaches a terminal branch. */
+	readonly onTerminal?: (event: {
+		readonly executionId: ShellExecutionId;
+		readonly branch: ShellStatus["_tag"];
+	}) => void;
+	/** Host-side observer fired when retention removes a record entirely. */
+	readonly onDropped?: (executionId: ShellExecutionId) => void;
 }
 
-const OUTPUT_CAPTURE_BYTES = 64 * 1024;
 // The event log is a host-side diagnostic seam, not a record store: it is
-// capped and keeps only a bounded script prefix so a session-long adapter
-// cannot accumulate model-authored scripts.
+// capped and carries no script content, so a session-long adapter cannot
+// accumulate model-authored scripts.
 const EVENT_BUFFER_CAP = 500;
-const EVENT_SCRIPT_PREVIEW_CHARS = 200;
 const DEFAULT_RECORDS_CAP = 1_000;
 const DEFAULT_EXPIRE_AFTER_MS = 60 * 60 * 1000;
 const DEFAULT_OUTPUT_CHARS_CAP = 4 * 1024 * 1024;
@@ -78,6 +85,9 @@ interface ShellRecord {
 	settleTimer?: ReturnType<typeof setTimeout>;
 }
 
+/** Default per-stream capture cap; a governing policy profile may bound it further. */
+export const DEFAULT_OUTPUT_CAPTURE_BYTES = 64 * 1024;
+
 const bucketOf = (ms: number): ShellDurationBucket =>
 	ms < 10
 		? "lt_10ms"
@@ -93,18 +103,20 @@ const bucketOf = (ms: number): ShellDurationBucket =>
 
 // A deterministic byte pattern so a re-run of the same admission produces the
 // same capture, while the capture stays a bounded prefix of the declared run.
-const buildOutput = (totalBytes: number): ShellOutput => {
-	const capturedBytes = Math.min(totalBytes, OUTPUT_CAPTURE_BYTES);
-	const raw = new Uint8Array(capturedBytes);
-	for (let i = 0; i < capturedBytes; i += 1) raw[i] = (i * 31 + 7) % 256;
-	return Object.freeze({
-		encoding: "base64" as const,
-		data: Buffer.from(raw).toString("base64"),
-		capturedBytes,
-		totalBytes,
-		truncated: totalBytes > capturedBytes,
-	});
-};
+const makeBuildOutput =
+	(captureCap: number) =>
+	(totalBytes: number): ShellOutput => {
+		const capturedBytes = Math.min(totalBytes, captureCap);
+		const raw = new Uint8Array(capturedBytes);
+		for (let i = 0; i < capturedBytes; i += 1) raw[i] = (i * 31 + 7) % 256;
+		return Object.freeze({
+			encoding: "base64" as const,
+			data: Buffer.from(raw).toString("base64"),
+			capturedBytes,
+			totalBytes,
+			truncated: totalBytes > capturedBytes,
+		});
+	};
 
 // Erased output keeps the record shape with nothing captured: callers see a
 // bounded capture that was cut, never why retention removed it.
@@ -151,9 +163,12 @@ export const makeDeterministicShell = (options: DeterministicShellOptions = {}) 
 	const recordsCap = options.recordsCap ?? DEFAULT_RECORDS_CAP;
 	const expireAfterMs = options.expireAfterMs ?? DEFAULT_EXPIRE_AFTER_MS;
 	const outputCharsCap = options.outputCharsCap ?? DEFAULT_OUTPUT_CHARS_CAP;
+	const buildOutput = makeBuildOutput(options.captureBytesCap ?? DEFAULT_OUTPUT_CAPTURE_BYTES);
 
 	const records = new Map<ShellExecutionId, ShellRecord>();
 	const events: DeterministicShellEvent[] = [];
+	const onTerminal = options.onTerminal ?? (() => {});
+	const onDropped = options.onDropped ?? (() => {});
 	let sequence = 0;
 
 	const pushEvent = (event: DeterministicShellEvent) => {
@@ -198,15 +213,24 @@ export const makeDeterministicShell = (options: DeterministicShellOptions = {}) 
 		});
 	};
 
-	const settle = (record: ShellRecord) => {
-		if (record.terminal !== undefined) return;
-		const terminal = buildTerminal(record, "settled");
+	const reachTerminal = (record: ShellRecord, kind: "settled" | "cancelled" | "shutdown") => {
+		const terminal = buildTerminal(record, kind);
 		record.terminal = terminal;
-		record.payloadChars = terminal.stdout.data.length + terminal.stderr.data.length;
+		if (kind === "settled") record.payloadChars = terminal.stdout.data.length + terminal.stderr.data.length;
 		if (record.settleTimer !== undefined) clearTimeout(record.settleTimer);
 		record.resolve(record.terminal);
-		pushEvent({ _tag: "settled", executionId: record.executionId, branch: record.status._tag });
+		pushEvent({
+			_tag: kind === "settled" ? "settled" : "cancelled",
+			executionId: record.executionId,
+			...(kind === "settled" ? { branch: record.status._tag } : {}),
+		} as DeterministicShellEvent);
+		onTerminal({ executionId: record.executionId, branch: record.terminal.status._tag });
 		enforceRetention(Date.now());
+	};
+
+	const settle = (record: ShellRecord) => {
+		if (record.terminal !== undefined) return;
+		reachTerminal(record, "settled");
 	};
 
 	const dropRecord = (executionId: ShellExecutionId) => {
@@ -216,9 +240,13 @@ export const makeDeterministicShell = (options: DeterministicShellOptions = {}) 
 		// Every admitted execution still reaches one closed branch: a pending
 		// record is terminated as a shutdown cancellation before eviction, so
 		// the taxonomy holds even when retention removes the record.
-		if (record.terminal === undefined) record.terminal = buildTerminal(record, "shutdown");
+		if (record.terminal === undefined) {
+			record.terminal = buildTerminal(record, "shutdown");
+			onTerminal({ executionId: record.executionId, branch: record.terminal.status._tag });
+		}
 		record.resolve(record.terminal);
 		records.delete(executionId);
+		onDropped(executionId);
 	};
 
 	const blankOutput = (record: ShellRecord) => {
@@ -299,11 +327,7 @@ export const makeDeterministicShell = (options: DeterministicShellOptions = {}) 
 					payloadChars: 0,
 				};
 				records.set(executionId, record);
-				pushEvent({
-					_tag: "admitted",
-					executionId,
-					scriptPreview: request.script.slice(0, EVENT_SCRIPT_PREVIEW_CHARS),
-				});
+				pushEvent({ _tag: "admitted", executionId });
 				if (record.settleDelay <= 0) settle(record);
 				else {
 					const timer = setTimeout(() => settle(record), record.settleDelay);
@@ -338,10 +362,7 @@ export const makeDeterministicShell = (options: DeterministicShellOptions = {}) 
 				const record = lookupAuthorized(request.executionId, subject);
 				if (record === undefined) return Effect.fail(notFound("shell.cancel"));
 				if (record.terminal !== undefined) return Effect.succeed(undefined);
-				record.terminal = buildTerminal(record, "cancelled");
-				if (record.settleTimer !== undefined) clearTimeout(record.settleTimer);
-				record.resolve(record.terminal);
-				pushEvent({ _tag: "cancelled", executionId: record.executionId });
+				reachTerminal(record, "cancelled");
 				return Effect.succeed(undefined);
 			}),
 		attach: (request, subject) =>

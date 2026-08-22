@@ -64,3 +64,4 @@ The project uses the canonical `needs-triage`, `needs-info`,
 
 This is a single-context project with a root glossary and locally scoped Linked
 Specs. See `docs/agents/domain.md`.
+

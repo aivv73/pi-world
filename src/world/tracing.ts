@@ -64,6 +64,7 @@ const errorCodes = new Set([
 	"SHELL_AUTHORITY_DENIED",
 	"SHELL_EXECUTION_NOT_FOUND",
 	"SHELL_WAIT_TIMEOUT",
+	"SHELL_UNAVAILABLE",
 ]);
 const cancelReasons = new Set(["caller", "execution_timeout", "shutdown"]);
 const opaqueId = /^[a-f0-9]{16}$/;

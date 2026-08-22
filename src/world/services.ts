@@ -17,12 +17,14 @@ import type {
 	WorldOperation,
 	WorldSubject,
 } from "./domain.js";
+import type { ShellGrantsService } from "./shell-authority.js";
 import { opaqueTraceId, WORLD_SPANS, withPrivacySafeSpan } from "./tracing.js";
 
 export type WorldDenied = Extract<WorldError, { readonly _tag: "WorldDenied" }>;
 export type ShellAuthorityDenied = Extract<WorldError, { readonly _tag: "ShellAuthorityDenied" }>;
 export type ShellExecutionNotFound = Extract<WorldError, { readonly _tag: "ShellExecutionNotFound" }>;
 export type ShellWaitTimeoutError = Extract<WorldError, { readonly _tag: "ShellWaitTimeoutError" }>;
+export type ShellUnavailableError = Extract<WorldError, { readonly _tag: "ShellUnavailableError" }>;
 export type AuthorityDenied = WorldDenied | ShellAuthorityDenied;
 export type AgentSpawnError = Extract<WorldError, { readonly _tag: "AgentSpawnError" }>;
 export type AgentNotFoundError = Extract<WorldError, { readonly _tag: "AgentNotFoundError" }>;
@@ -51,7 +53,7 @@ export interface ShellService {
 	readonly virtualExec: (
 		request: VirtualShellExecRequest,
 		owner: WorldSubject,
-	) => Effect.Effect<ShellExecutionHandleData>;
+	) => Effect.Effect<ShellExecutionHandleData, ShellAuthorityDenied | ShellUnavailableError>;
 	readonly wait: (
 		request: ShellWaitRequest,
 		subject: WorldSubject,
@@ -72,6 +74,7 @@ export const Authority = Context.Service<AuthorityService>("World/Authority");
 export const Agents = Context.Service<AgentsService>("World/Agents");
 export const Web = Context.Service<WebService>("World/Web");
 export const Shell = Context.Service<ShellService>("World/Shell");
+export const ShellGrants = Context.Service<ShellGrantsService>("World/ShellGrants");
 
 export const authorize = (subject: WorldSubject, operation: WorldOperation) =>
 	Effect.gen(function* () {
@@ -119,6 +122,12 @@ export const spawnAgent = (subject: WorldSubject, request: AgentSpawnRequest) =>
 		WORLD_SPANS.agentSpawn,
 		Effect.gen(function* () {
 			yield* authorize(subject, "agents.spawn");
+			if (request.shellProfile !== undefined) {
+				// The child may name a narrower profile; the host proves the
+				// narrowing and issues the child grant before any agent exists.
+				const grants = yield* ShellGrants;
+				yield* grants.attenuate(subject, request.shellProfile);
+			}
 			const agents = yield* Agents;
 			return yield* agents.spawn(request);
 		}),

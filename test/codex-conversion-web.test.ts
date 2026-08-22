@@ -11,6 +11,7 @@ import {
 	CodexConversionWebLive,
 	makeCodexConversionWeb,
 } from "../src/world/codex-conversion-web.js";
+import { makePrincipalId } from "../src/world/domain.js";
 import { searchWeb } from "../src/world/services.js";
 
 const tempDirs: string[] = [];
@@ -90,7 +91,12 @@ const fakeBinary = (directory: string, options: { delayMs?: number; readyFile?: 
 	chmodSync(binary, 0o755);
 };
 
-const subject = { sessionId: "world-session", cellId: "cell-web", depth: 0 };
+const subject = {
+	sessionId: "world-session",
+	cellId: "cell-web",
+	depth: 0,
+	principalId: makePrincipalId("principal-world-session"),
+};
 
 afterEach(async () => {
 	await Promise.allSettled(runtimes.splice(0).map((runtime) => runtime.dispose()));

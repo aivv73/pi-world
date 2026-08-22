@@ -66,14 +66,18 @@ returns an ergonomic handle at admission; `wait()` settles from process close
 and `cancel()` awaits bounded cleanup. `spawnMany()` admits a fan-out before
 anything is awaited. Legacy `rlm.run` remains available for compatibility.
 
-**Virtual Shell as a traced World call.** `world.shell.virtual.exec({ script })`
-exercises the complete guest-to-authority-to-session-runtime path and returns a
-live handle: `wait()` yields the immutable schema-v1 terminal record (exited,
-timed_out, cancelled, budget_exhausted, or failed), `wait({ timeoutMs })`
+**Virtual Shell as a governed World call.** `world.shell.virtual.exec({ script })`
+exercises the complete guest-to-principal-to-grant-to-audit-to-adapter path and
+returns a live handle: `wait()` yields the immutable schema-v1 terminal record
+(exited, timed_out, cancelled, budget_exhausted, or failed), `wait({ timeoutMs })`
 withdraws the observation without cancelling, `cancel()` is idempotent, and
 `world.shell.attach({ executionId })` reconstitutes the handle from a durable
-ID. The first adapter is a deterministic contract tracer that executes nothing;
-the ambient-free Virtual Environment replaces it in the next implementation slice.
+ID. Authority is host-owned end to end: one least-authority Virtual grant per
+session principal, spawn-time child attenuation that must prove every profile
+component narrower, cascading revocation that cancels active work, and a
+durable metadata-only admission audit whose failure makes the shell
+unavailable. The first adapter is a deterministic contract tracer that executes
+nothing; the ambient-free Virtual Environment replaces it in a later slice.
 
 **Cancellation that costs one cell.** Interrupting a running cell leaves the
 namespace intact, and the cancelled cell cannot keep writing to it afterwards.

@@ -9,9 +9,17 @@ export type AttemptId = typeof AttemptIdSchema.Type;
 export const ShellExecutionIdSchema = Schema.String.pipe(Schema.brand("ShellExecutionId"));
 export type ShellExecutionId = typeof ShellExecutionIdSchema.Type;
 
+export const PrincipalIdSchema = Schema.String.pipe(Schema.brand("PrincipalId"));
+export type PrincipalId = typeof PrincipalIdSchema.Type;
+
+export const GrantIdSchema = Schema.String.pipe(Schema.brand("GrantId"));
+export type GrantId = typeof GrantIdSchema.Type;
+
 export const makeAgentId = (value: string) => Schema.decodeUnknownSync(AgentIdSchema)(value);
 export const makeAttemptId = (value: string) => Schema.decodeUnknownSync(AttemptIdSchema)(value);
 export const makeShellExecutionId = (value: string) => Schema.decodeUnknownSync(ShellExecutionIdSchema)(value);
+export const makePrincipalId = (value: string) => Schema.decodeUnknownSync(PrincipalIdSchema)(value);
+export const makeGrantId = (value: string) => Schema.decodeUnknownSync(GrantIdSchema)(value);
 
 export type JsonValue =
 	| null
@@ -32,10 +40,13 @@ export const JsonValueSchema: Schema.Decoder<JsonValue> = Schema.suspend(() =>
 	]),
 );
 
+// The subject is reconstructed by the host from its own session context on
+// every call; a guest never supplies principal identity.
 export const WorldSubjectSchema = Schema.Struct({
 	sessionId: Schema.String,
 	cellId: Schema.optionalKey(Schema.String),
 	depth: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+	principalId: PrincipalIdSchema,
 });
 export type WorldSubject = typeof WorldSubjectSchema.Type;
 
@@ -148,6 +159,15 @@ const ShellWaitTimeoutErrorSchema = Schema.Struct({
 	message: Schema.String,
 });
 
+// The mandatory audit is a precondition of admission: when it cannot record,
+// the shell is unavailable — one stable error, no side effect.
+const ShellUnavailableErrorSchema = Schema.Struct({
+	_tag: Schema.Literal("ShellUnavailableError"),
+	code: Schema.Literal("SHELL_UNAVAILABLE"),
+	operation: Schema.Literals(SHELL_OPERATIONS),
+	message: Schema.String,
+});
+
 export const WorldErrorSchema = Schema.Union([
 	WorldInvalidRequestSchema,
 	WorldInternalErrorSchema,
@@ -162,6 +182,7 @@ export const WorldErrorSchema = Schema.Union([
 	ShellAuthorityDeniedSchema,
 	ShellExecutionNotFoundSchema,
 	ShellWaitTimeoutErrorSchema,
+	ShellUnavailableErrorSchema,
 ]);
 export type WorldError = typeof WorldErrorSchema.Type;
 
@@ -169,6 +190,10 @@ export const AgentSpawnRequestSchema = Schema.Struct({
 	task: Schema.String,
 	model: Schema.optionalKey(Schema.String),
 	timeoutMs: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+	// A child may NAME a narrower policy profile; the host proves it is a
+	// component-wise subset of the caller's own authority before issuing a
+	// child grant. The name carries no authority by itself.
+	shellProfile: Schema.optionalKey(Schema.String),
 });
 export type AgentSpawnRequest = typeof AgentSpawnRequestSchema.Type;
 

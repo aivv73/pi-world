@@ -5,10 +5,18 @@ import { join } from "node:path";
 import { Effect } from "effect";
 import { EngineManager } from "../src/engine/index.js";
 import { createWorldHost } from "../src/world/bridge.js";
-import { type DeterministicShellOptions, makeDeterministicShell } from "../src/world/deterministic-shell.js";
-import type { WorldOperation } from "../src/world/domain.js";
+import type { DeterministicShellOptions } from "../src/world/deterministic-shell.js";
+import { makePrincipalId, type WorldOperation } from "../src/world/domain.js";
 import { makeWorldRuntime, type WorldRuntime } from "../src/world/runtime.js";
 import type { AuthorityService } from "../src/world/services.js";
+import {
+	DEFAULT_VIRTUAL_PROFILES,
+	makeFileShellAudit,
+	makeGrantEnforcedTracer,
+	makeProfileRegistry,
+	makeShellGrants,
+	VIRTUAL_TRACER_PROFILE,
+} from "../src/world/shell-authority.js";
 import { makeDeterministicAgents, makeDeterministicWeb } from "../src/world/test-adapters.js";
 
 const engines: EngineManager[] = [];
@@ -37,23 +45,39 @@ const harness = (
 		waitDelayMs: options.waitDelayMs,
 	});
 	const web = makeDeterministicWeb();
-	const shell = makeDeterministicShell(options.shellOptions);
+	// The bridge harness runs the same governed tracer stack as production:
+	// host-issued root grant, durable audit, and grant-enforced admissions.
+	const grants = makeShellGrants({ registry: makeProfileRegistry(DEFAULT_VIRTUAL_PROFILES) });
+	const principalId = makePrincipalId("principal-session-bridge");
+	grants.issueRoot({ principalId, sessionId: "session-bridge", depth: options.depth ?? 0, lineage: [] });
+	const governed = makeGrantEnforcedTracer({
+		grants,
+		audit: makeFileShellAudit({ path: join(tempDir(), "shell-audit.jsonl") }),
+		profile: VIRTUAL_TRACER_PROFILE,
+		tracerOptions: options.shellOptions,
+	});
 	const runtime = makeWorldRuntime({
 		agents: agents.service,
 		web: web.service,
-		shell: shell.service,
+		shell: governed.service,
+		grants,
 		maxDepth: options.maxDepth,
 		allowedOperations: options.allowedOperations,
 		authority: options.authority,
 	});
 	runtimes.push(runtime);
-	const host = createWorldHost({ runtime, sessionId: "session-bridge", depth: options.depth ?? 0 });
+	const host = createWorldHost({
+		runtime,
+		sessionId: "session-bridge",
+		depth: options.depth ?? 0,
+		principalId: makePrincipalId("principal-session-bridge"),
+	});
 	const engine = new EngineManager({
 		hostHandlers: host.handlers,
 		snapshot: options.snapshot ? { path: options.snapshot, debounceMs: 600_000 } : undefined,
 	});
 	engines.push(engine);
-	return { engine, agents, web, shell, handlers: host.handlers };
+	return { engine, agents, web, governed, grants, principalId, handlers: host.handlers };
 };
 
 afterEach(async () => {
@@ -64,14 +88,26 @@ afterEach(async () => {
 
 describe("World evaluator bridge", () => {
 	test("guest traces one Virtual Shell execution through host identity, runtime, and deterministic adapter", async () => {
-		const authorized: Array<{ operation: WorldOperation; sessionId: string; cellId?: string; depth: number }> = [];
+		const subjectFields = {
+			sessionId: "session-bridge",
+			cellId: "shell-cell",
+			depth: 1,
+			principalId: makePrincipalId("principal-session-bridge"),
+		};
+		const authorized: Array<{
+			operation: WorldOperation;
+			sessionId: string;
+			cellId?: string;
+			depth: number;
+			principalId: unknown;
+		}> = [];
 		const authority: AuthorityService = {
 			check: (subject, operation) =>
 				Effect.sync(() => {
 					authorized.push({ operation, ...subject });
 				}),
 		};
-		const { engine, shell, agents, web } = harness({ authority, depth: 1 });
+		const { engine, governed, agents, web } = harness({ authority, depth: 1 });
 		const result = await engine.execute(
 			[
 				'const shellExecution = await world.shell.virtual.exec({ script: "echo tracer" });',
@@ -90,15 +126,15 @@ describe("World evaluator bridge", () => {
 		expect(result.result).toContain('status: "exited"');
 		expect(result.result).toContain("A");
 		expect(result.result).toContain("result: Effect bridge");
-		expect(shell.events.map((event) => event._tag)).toEqual(["admitted", "settled", "waited"]);
+		expect(governed.events.map((event) => event._tag)).toEqual(["admitted", "settled", "waited"]);
 		expect(agents.events.map((event) => event._tag)).toEqual(["spawned", "waited"]);
 		expect(web.queries).toEqual(["Effect bridge"]);
 		expect(authorized).toEqual([
-			{ operation: "shell.virtual.exec", sessionId: "session-bridge", cellId: "shell-cell", depth: 1 },
-			{ operation: "agents.spawn", sessionId: "session-bridge", cellId: "shell-cell", depth: 1 },
-			{ operation: "shell.wait", sessionId: "session-bridge", cellId: "shell-cell", depth: 1 },
-			{ operation: "agents.wait", sessionId: "session-bridge", cellId: "shell-cell", depth: 1 },
-			{ operation: "web.search", sessionId: "session-bridge", cellId: "shell-cell", depth: 1 },
+			{ operation: "shell.virtual.exec", ...subjectFields },
+			{ operation: "agents.spawn", ...subjectFields },
+			{ operation: "shell.wait", ...subjectFields },
+			{ operation: "agents.wait", ...subjectFields },
+			{ operation: "web.search", ...subjectFields },
 		]);
 	});
 
@@ -111,7 +147,7 @@ describe("World evaluator bridge", () => {
 		expect(malformed.result).toContain("SHELL_INVALID_REQUEST");
 		expect(malformed.result).toContain("shell.virtual.exec");
 		expect(malformed.result).not.toContain("ParseError");
-		expect(malformedHarness.shell.events).toHaveLength(0);
+		expect(malformedHarness.governed.events).toHaveLength(0);
 
 		const deniedHarness = harness({
 			allowedOperations: ["agents.spawn", "agents.wait", "agents.cancel", "web.search"],
@@ -122,7 +158,7 @@ describe("World evaluator bridge", () => {
 		expect(denied.status).toBe("ok");
 		expect(denied.result).toContain("SHELL_AUTHORITY_DENIED");
 		expect(denied.result).toContain("shell.virtual.exec");
-		expect(deniedHarness.shell.events).toHaveLength(0);
+		expect(deniedHarness.governed.events).toHaveLength(0);
 	});
 
 	test("guest code fans out ergonomic handles and waits without a status or list API", async () => {
@@ -164,7 +200,7 @@ describe("World evaluator bridge", () => {
 
 		const deniedHarness = harness({ depth: 1, maxDepth: 1 });
 		const denied = await deniedHarness.engine.execute(
-			'let caught; try { await world.agents.spawn({ task: "too deep", depth: 0, sessionId: "forged" }); } catch (error) { caught = { code: error.code, operation: error.operation }; } caught',
+			'let caught; try { await world.agents.spawn({ task: "too deep" }); } catch (error) { caught = { code: error.code, operation: error.operation }; } caught',
 		);
 		expect(denied.status).toBe("ok");
 		expect(denied.result).toContain("WORLD_ACCESS_DENIED");
@@ -287,6 +323,37 @@ describe("World evaluator bridge", () => {
 		expect(result.result).toContain('settled: "exited"');
 		expect(result.result).toContain('expiredWait: "SHELL_EXECUTION_NOT_FOUND"');
 		expect(result.result).toContain('expiredAttach: "SHELL_EXECUTION_NOT_FOUND"');
+	});
+
+	test("guest-supplied authority fields never establish authority", async () => {
+		const { engine } = harness();
+		const spawnForge = await engine.execute(
+			'let caught; try { await world.agents.spawn({ task: "x", principalId: "forged-principal", grantId: "forged-grant" }); } catch (error) { caught = { code: error.code }; } caught',
+		);
+		expect(spawnForge.status).toBe("ok");
+		expect(spawnForge.result).toContain("WORLD_INVALID_REQUEST");
+
+		const execForge = await engine.execute(
+			'let caught; try { await world.shell.virtual.exec({ schemaVersion: 1, script: "x", grantId: "forged-grant" }); } catch (error) { caught = { code: error.code }; } caught',
+		);
+		expect(execForge.status).toBe("ok");
+		expect(execForge.result).toContain("SHELL_INVALID_REQUEST");
+	});
+
+	test("a child spawn may request a named profile and the host proves narrowing", async () => {
+		const { engine } = harness();
+		const admitted = await engine.execute(
+			'const child = await world.agents.spawn({ task: "scoped child", shellProfile: "virtual-tracer-v1" }); child.agentId.startsWith("agent-")',
+		);
+		expect(admitted.status).toBe("ok");
+		expect(admitted.result).toContain("true");
+
+		const denied = await engine.execute(
+			'let caught; try { await world.agents.spawn({ task: "bad profile", shellProfile: "no-such-profile" }); } catch (error) { caught = { code: error.code, operation: error.operation }; } caught',
+		);
+		expect(denied.status).toBe("ok");
+		expect(denied.result).toContain("WORLD_ACCESS_DENIED");
+		expect(denied.result).toContain("agents.spawn");
 	});
 
 	test("the shell surface has no list, search, status, or retry API", async () => {

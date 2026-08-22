@@ -1,5 +1,6 @@
 import { Schema } from "effect";
 import { HostRequestError, type HostRequestHandler, type HostRequestHandlers } from "../engine/index.js";
+import type { PrincipalId } from "./domain.js";
 import {
 	AgentCancelRequestSchema,
 	AgentHandleDataSchema,
@@ -36,6 +37,8 @@ export interface WorldBridgeOptions {
 	readonly runtime: WorldRuntime;
 	readonly sessionId: string;
 	readonly depth: number;
+	/** Host-established principal for this session root; never guest-supplied. */
+	readonly principalId: PrincipalId;
 }
 
 const invalidRequest = (operation: WorldOperation): WorldError =>
@@ -96,7 +99,12 @@ const handler =
 	async (payload, context) => {
 		const subject = decode(
 			WorldSubjectSchema,
-			{ sessionId: options.sessionId, cellId: context?.cellId, depth: options.depth },
+			{
+				sessionId: options.sessionId,
+				cellId: context?.cellId,
+				depth: options.depth,
+				principalId: options.principalId,
+			},
 			operation,
 		);
 		try {
@@ -117,7 +125,9 @@ const handler =
 export const createWorldHost = (options: WorldBridgeOptions): { readonly handlers: HostRequestHandlers } => ({
 	handlers: {
 		"world.agents.spawn": handler(options, "agents.spawn", async (payload, subject, signal) => {
-			const request = decode(AgentSpawnRequestSchema, payload.request, "agents.spawn");
+			// Strict: a guest cannot smuggle grants, lineage, or principal
+			// identity through the spawn payload.
+			const request = decode(AgentSpawnRequestSchema, payload.request, "agents.spawn", true);
 			const result = await options.runtime.runPromise(spawnAgent(subject, request), { signal });
 			return decode(AgentHandleDataSchema, result, "agents.spawn");
 		}),
