@@ -69,6 +69,12 @@ The World core (`src/world/`) is built on Effect v4. Consult the `effect`
 skill before writing or changing workflows, services, layers, schemas,
 schedules, caches, streams, HTTP clients, or Effect tests.
 
+### Reviews
+
+Run the `dpc-general-multipart-review` skill on big changes: multi-file
+refactors, new subsystems, and contract or behavior changes across
+components. Small fixes and doc edits do not need it.
+
 ### Project knowledge
 
 This project uses the Linked Specs convention; consult the `linked-specs`
