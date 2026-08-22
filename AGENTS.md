@@ -60,6 +60,12 @@ The project uses the canonical `needs-triage`, `needs-info`,
 `ready-for-agent`, `ready-for-human`, and `wontfix` roles. See
 `docs/agents/triage-labels.md`.
 
+### Effect
+
+The World core (`src/world/`) is built on Effect v4. Consult the `effect`
+skill before writing or changing workflows, services, layers, schemas,
+schedules, caches, streams, HTTP clients, or Effect tests.
+
 ### Project knowledge
 
 This project uses the Linked Specs convention; consult the `linked-specs`
