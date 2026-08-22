@@ -36,7 +36,7 @@
 		"bun": ">=1.0.0"
 	},
 	"scripts": {
-		"test": "bun test test/",
+		"test": "bun test test/ --parallel=1",
 		"typecheck": "tsc --noEmit",
 		"format": "biome format --write .",
 		"lint": "biome check .",

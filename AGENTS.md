@@ -42,6 +42,10 @@ the snapshot; anything unserialisable does not.
 ## Conventions
 
 - Tabs, 120 columns, enforced by biome. Run `bun run format`.
+- Tests run with `--parallel=1`: several suites spawn real child processes,
+  and parallel workers on a small runner starve signal delivery to them, which
+  made the interruption contract flaky. Sequential files cost no wall time
+  here and keep process behavior reproducible.
 - Engine code (`src/engine/`) has no pi dependencies and is testable standalone.
 - Extension code that needs pi's runtime is kept thin, with the logic extracted
   into a pure module beside it (`render-core.ts` next to `render.ts`).
