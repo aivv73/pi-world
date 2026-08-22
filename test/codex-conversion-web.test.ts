@@ -68,11 +68,14 @@ const fakeBinary = (directory: string, options: { delayMs?: number; readyFile?: 
 		[
 			"#!/usr/bin/env node",
 			'const fs = require("node:fs");',
+			// Register the signal handler before announcing readiness: a kill
+			// landing in the synchronous gap between those lines would take the
+			// default disposition and never produce the evidence this test reads.
+			`process.on("SIGTERM", () => { ${signalLine} process.exit(143); });`,
 			readyLine,
 			'let body = "";',
 			'process.stdin.setEncoding("utf8");',
 			'process.stdin.on("data", (chunk) => { body += chunk; });',
-			`process.on("SIGTERM", () => { ${signalLine} process.exit(143); });`,
 			'process.stdin.on("end", () => {',
 			"  const input = JSON.parse(body);",
 			"  setTimeout(() => process.stdout.write(JSON.stringify({",
