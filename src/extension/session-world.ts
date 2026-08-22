@@ -62,10 +62,16 @@ export const createSessionWorld = (options: SessionWorldOptions): SessionWorld =
 	// Principal identity is host-established: one session root principal,
 	// derived from the session id, holding the least-authority Virtual grant.
 	const principalId = makePrincipalId("principal-" + options.sessionId);
-	const grants = makeShellGrants({ registry: makeProfileRegistry(DEFAULT_VIRTUAL_PROFILES) });
+	const registry = makeProfileRegistry(DEFAULT_VIRTUAL_PROFILES);
+	const grants = makeShellGrants({ registry });
 	grants.issueRoot({ principalId, sessionId: options.sessionId, depth: options.depth, lineage: [] });
 	const audit = makeFileShellAudit({ path: join(options.sessionDir, "shell-audit.jsonl") });
-	const governedShell = makeGrantEnforcedTracer({ grants, audit, profile: VIRTUAL_TRACER_PROFILE });
+	const governedShell = makeGrantEnforcedTracer({
+		grants,
+		audit,
+		registry,
+		profileId: VIRTUAL_TRACER_PROFILE.profileId,
+	});
 
 	const runtime = ManagedRuntime.make(
 		Layer.mergeAll(

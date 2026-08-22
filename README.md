@@ -195,5 +195,6 @@ src/world/        experimental Effect-native runtime core
   pi-process-agents.ts  session-scoped Pi child process adapter
   codex-conversion-web.ts  isolated pinned Codex web adapter
   deterministic-shell.ts  non-executing Virtual Shell contract tracer
+  shell-authority.ts  Agent Principals, Shell Grants, attenuation proof, mandatory audit
   tracing.ts      privacy-safe semantic spans and in-memory test tracer
 ```

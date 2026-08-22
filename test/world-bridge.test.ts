@@ -47,13 +47,15 @@ const harness = (
 	const web = makeDeterministicWeb();
 	// The bridge harness runs the same governed tracer stack as production:
 	// host-issued root grant, durable audit, and grant-enforced admissions.
-	const grants = makeShellGrants({ registry: makeProfileRegistry(DEFAULT_VIRTUAL_PROFILES) });
+	const registry = makeProfileRegistry(DEFAULT_VIRTUAL_PROFILES);
+	const grants = makeShellGrants({ registry });
 	const principalId = makePrincipalId("principal-session-bridge");
 	grants.issueRoot({ principalId, sessionId: "session-bridge", depth: options.depth ?? 0, lineage: [] });
 	const governed = makeGrantEnforcedTracer({
 		grants,
 		audit: makeFileShellAudit({ path: join(tempDir(), "shell-audit.jsonl") }),
-		profile: VIRTUAL_TRACER_PROFILE,
+		registry,
+		profileId: VIRTUAL_TRACER_PROFILE.profileId,
 		tracerOptions: options.shellOptions,
 	});
 	const runtime = makeWorldRuntime({

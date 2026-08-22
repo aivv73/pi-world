@@ -386,7 +386,8 @@ describe("Shell principals, grants, and mandatory audit", () => {
 		const governed = makeGrantEnforcedTracer({
 			grants,
 			audit,
-			profile: options.servedProfile ?? VIRTUAL_TRACER_PROFILE,
+			registry,
+			profileId: (options.servedProfile ?? VIRTUAL_TRACER_PROFILE).profileId,
 			tracerOptions: options.tracerOptions,
 		});
 		const world = makeWorldRuntime({
@@ -642,7 +643,12 @@ describe("Shell principals, grants, and mandatory audit", () => {
 			const grants = makeShellGrants({ registry });
 			grants.issueRoot({ principalId: subject.principalId, sessionId: subject.sessionId, depth: 0, lineage: [] });
 			const audit = makeFileShellAudit({ path });
-			const governed = makeGrantEnforcedTracer({ grants, audit, profile: VIRTUAL_TRACER_PROFILE });
+			const governed = makeGrantEnforcedTracer({
+				grants,
+				audit,
+				registry,
+				profileId: VIRTUAL_TRACER_PROFILE.profileId,
+			});
 			const world = makeWorldRuntime({
 				agents: makeDeterministicAgents().service,
 				web: makeDeterministicWeb().service,
@@ -807,6 +813,113 @@ describe("Shell principals, grants, and mandatory audit", () => {
 		).rejects.toMatchObject({ _tag: "ShellUnavailableError", code: "SHELL_UNAVAILABLE" });
 		expect(admissions).toEqual(["shell.virtual.exec"]);
 		expect(governed.recordCount()).toBe(1);
+	});
+
+	test("a subject from another session cannot reuse a principal's grant", async () => {
+		const { governed, world } = makeGovernedWorld({ tracerOptions: { executionMs: 40 } });
+		const impostor = { ...subject, sessionId: "other-session" };
+		await expect(
+			world.runPromise(executeVirtualShell(impostor, { schemaVersion: 1, script: "cross session" })),
+		).rejects.toMatchObject({ code: "SHELL_AUTHORITY_DENIED" });
+
+		const handle = await world.runPromise(executeVirtualShell(subject, { schemaVersion: 1, script: "owner work" }));
+		const impostorWait = (await world
+			.runPromise(waitForShellExecution(impostor, { executionId: handle.executionId }))
+			.catch((error) => error)) as object;
+		const unknownWait = (await world
+			.runPromise(
+				waitForShellExecution(impostor, { executionId: makeShellExecutionId("00000000-0000-0000-0000-000000000000") }),
+			)
+			.catch((error) => error)) as object;
+		expect(impostorWait).toEqual(unknownWait);
+		expect(governed.events.filter((event) => event._tag === "admitted")).toHaveLength(1);
+	});
+
+	test("a throwing health probe is treated as an outage", async () => {
+		const audit: ShellAuditService = {
+			admit: () => {},
+			terminal: () => {},
+			revocation: () => {},
+			healthy: () => {
+				throw new Error("probe exploded");
+			},
+		};
+		const { world } = makeGovernedWorld({ audit });
+		await expect(
+			world.runPromise(executeVirtualShell(subject, { schemaVersion: 1, script: "probed" })),
+		).rejects.toMatchObject({ code: "SHELL_UNAVAILABLE" });
+	});
+
+	test("one throwing revocation listener does not block the others", async () => {
+		const { grants, rootGrant, governed, world } = makeGovernedWorld({ tracerOptions: { executionMs: 150 } });
+		const seen: number[] = [];
+		grants.onRevocation(() => {
+			throw new Error("listener outage");
+		});
+		grants.onRevocation((revoked) => {
+			seen.push(revoked.length);
+		});
+		await world.runPromise(executeVirtualShell(subject, { schemaVersion: 1, script: "pending revoke" }));
+
+		grants.revoke(rootGrant.grantId);
+		expect(seen).toHaveLength(1);
+		for (let attempt = 0; attempt < 100 && governed.pendingCount() > 0; attempt += 1) {
+			await sleep(10);
+		}
+		expect(governed.pendingCount()).toBe(0);
+	});
+
+	test("profile ceilings must be finite in-range integers", () => {
+		expect(() =>
+			makeProfileRegistry([
+				{ ...narrowProfile(), ceilings: { ...narrowProfile().ceilings, executionTimeoutMs: Number.POSITIVE_INFINITY } },
+			]),
+		).toThrow(/safe integers/);
+		expect(() =>
+			makeProfileRegistry([
+				{ ...narrowProfile(), ceilings: { ...narrowProfile().ceilings, concurrentExecutions: Number.NaN } },
+			]),
+		).toThrow(/safe integers/);
+	});
+
+	test("attenuation denies widening any single expressible component", async () => {
+		// root, network, and environment are closed literals in v1, and no
+		// operation exceeds the default profile's set, so the per-component
+		// dimensions exercised here are the three numeric ceilings and the
+		// drain exception.
+		const widenProfiles: PolicyProfile[] = [
+			{
+				...VIRTUAL_TRACER_PROFILE,
+				profileId: "widen-timeout",
+				ceilings: { ...VIRTUAL_TRACER_PROFILE.ceilings, executionTimeoutMs: 60_001 },
+			},
+			{
+				...VIRTUAL_TRACER_PROFILE,
+				profileId: "widen-output",
+				ceilings: { ...VIRTUAL_TRACER_PROFILE.ceilings, outputBytes: 131_073 },
+			},
+			{
+				...VIRTUAL_TRACER_PROFILE,
+				profileId: "widen-concurrency",
+				ceilings: { ...VIRTUAL_TRACER_PROFILE.ceilings, concurrentExecutions: 17 },
+			},
+			{ ...VIRTUAL_TRACER_PROFILE, profileId: "widen-drain", drainOnRevocation: true },
+		];
+		const { grants, principalId, world } = makeGovernedWorld({
+			profiles: [VIRTUAL_TRACER_PROFILE, ...widenProfiles],
+		});
+		// Positive control: the same profile is acceptable for a full root grant,
+		// so the denials below are caused by widening, not by the profiles.
+		const equalGrant = await world.runPromise(
+			spawnAgentAttenuationProbe(grants, principalId, VIRTUAL_TRACER_PROFILE.profileId),
+		);
+		expect(equalGrant.profiles).toEqual([VIRTUAL_TRACER_PROFILE.profileId]);
+
+		for (const profile of widenProfiles) {
+			await expect(
+				world.runPromise(spawnAgentAttenuationProbe(grants, principalId, profile.profileId)),
+			).rejects.toMatchObject({ _tag: "WorldDenied" });
+		}
 	});
 });
 

@@ -88,6 +88,13 @@ interface ShellRecord {
 /** Default per-stream capture cap; a governing policy profile may bound it further. */
 export const DEFAULT_OUTPUT_CAPTURE_BYTES = 64 * 1024;
 
+// Host-side declarations are clamped rather than bit-truncated: a wrapped
+// huge or negative size would corrupt retention and capture math downstream.
+const declaredByteCount = (value: number | undefined): number => {
+	const size = value ?? 0;
+	return Number.isSafeInteger(size) && size > 0 ? size : 0;
+};
+
 const bucketOf = (ms: number): ShellDurationBucket =>
 	ms < 10
 		? "lt_10ms"
@@ -319,8 +326,8 @@ export const makeDeterministicShell = (options: DeterministicShellOptions = {}) 
 					queueMs,
 					settleDelay: timedOut ? (executionTimeoutMs as number) : total,
 					status: Object.freeze(status),
-					stdoutBytes: (declaration?.stdoutBytes ?? 0) | 0,
-					stderrBytes: (declaration?.stderrBytes ?? 0) | 0,
+					stdoutBytes: declaredByteCount(declaration?.stdoutBytes),
+					stderrBytes: declaredByteCount(declaration?.stderrBytes),
 					terminal: undefined,
 					pending,
 					resolve,

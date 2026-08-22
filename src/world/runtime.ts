@@ -22,6 +22,12 @@ export interface WorldRuntimeOptions extends StaticAuthorityOptions {
 	readonly authority?: AuthorityService;
 	readonly agents: AgentsService;
 	readonly web: WebService;
+	/**
+	 * Production composition must pass a grant-enforced shell (see
+	 * `makeGrantEnforcedTracer`); this option exists so tests can mount the
+	 * raw deterministic adapter directly. A raw shell admits without grants,
+	 * audit, or ceilings.
+	 */
 	readonly shell: ShellService;
 	/** Host-owned grant registry; a fresh least-authority registry is the default. */
 	readonly grants?: ShellGrantsService;

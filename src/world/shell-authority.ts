@@ -85,6 +85,20 @@ export interface ProfileRegistry {
 	readonly lookup: (profileId: string) => PolicyProfile | undefined;
 }
 
+// A non-finite ceiling would survive every Math.min comparison and silently
+// disable the limit it describes, so profiles are validated at registration.
+const validatedCeilings = (ceilings: PolicyCeilings): PolicyCeilings => {
+	const inRange = (value: number, min: number) => Number.isSafeInteger(value) && value >= min;
+	if (
+		!inRange(ceilings.executionTimeoutMs, 1) ||
+		!inRange(ceilings.outputBytes, 0) ||
+		!inRange(ceilings.concurrentExecutions, 1)
+	) {
+		throw new Error("policy profile ceilings must be safe integers within range");
+	}
+	return ceilings;
+};
+
 // A profile is authority: the registry copies and freezes every level so a
 // later caller-side mutation cannot widen grants that were already issued.
 export const makeProfileRegistry = (profiles: readonly PolicyProfile[]): ProfileRegistry => {
@@ -93,7 +107,7 @@ export const makeProfileRegistry = (profiles: readonly PolicyProfile[]): Profile
 			const frozen: PolicyProfile = Object.freeze({
 				...profile,
 				operations: Object.freeze([...profile.operations]),
-				ceilings: Object.freeze({ ...profile.ceilings }),
+				ceilings: Object.freeze(validatedCeilings({ ...profile.ceilings })),
 			});
 			return [frozen.profileId, frozen] as const;
 		}),
@@ -271,7 +285,15 @@ export const makeShellGrants = (options: ShellGrantsOptions): ShellGrantsService
 					revoked.push(id);
 				}
 			}
-			for (const listener of listeners) listener(revoked);
+			for (const listener of listeners) {
+				// One failing listener must never block the rest of the
+				// notification chain or the cancellation sweep behind it.
+				try {
+					listener(revoked);
+				} catch {
+					// The tombstones are already authoritative.
+				}
+			}
 			return revoked;
 		},
 		onRevocation: (listener) => {
@@ -321,10 +343,13 @@ export const makeFileShellAudit = (options: { readonly path: string }): ShellAud
 	let unhealthy = false;
 	const append = (entry: Record<string, unknown>) => {
 		sequence += 1;
-		const line = JSON.stringify({ seq: sequence, ts: new Date().toISOString(), ...entry }) + "\n";
+		const bytes = Buffer.from(JSON.stringify({ seq: sequence, ts: new Date().toISOString(), ...entry }) + "\n", "utf8");
 		const fd = openSync(options.path, "a");
 		try {
-			writeSync(fd, line);
+			// A short write would fsync a partial admission record as success,
+			// so the append loops until every byte is written.
+			let written = 0;
+			while (written < bytes.length) written += writeSync(fd, bytes, written);
 			fsyncSync(fd);
 		} finally {
 			closeSync(fd);
@@ -380,7 +405,13 @@ interface TrackedAdmission {
 export interface GrantEnforcedTracerOptions {
 	readonly grants: ShellGrantsService;
 	readonly audit: ShellAuditService;
-	readonly profile: PolicyProfile;
+	/**
+	 * The served profile is resolved from this registry, never accepted as a
+	 * caller-supplied object: a same-ID profile with widened ceilings would
+	 * otherwise bypass the frozen authority grants were proven against.
+	 */
+	readonly registry: ProfileRegistry;
+	readonly profileId: string;
 	readonly tracerOptions?: DeterministicShellOptions;
 }
 
@@ -424,6 +455,11 @@ export const makeGrantEnforcedTracer = (deps: GrantEnforcedTracerOptions) => {
 	// timer callback; contain it here and refuse further admissions locally.
 	let terminalAuditHealthy = true;
 
+	const profile = deps.registry.lookup(deps.profileId);
+	if (profile === undefined) {
+		throw new Error("the served shell profile is not in the registry: " + deps.profileId);
+	}
+
 	const writeTerminalAudit = (executionId: ShellExecutionId, branch: ShellStatus["_tag"]) => {
 		const admission = admissions.get(executionId);
 		if (admission === undefined) return;
@@ -432,7 +468,7 @@ export const makeGrantEnforcedTracer = (deps: GrantEnforcedTracerOptions) => {
 				executionId,
 				principalId: admission.principalId,
 				grantId: admission.grantId,
-				profileId: deps.profile.profileId,
+				profileId: profile.profileId,
 				branch,
 			});
 		} catch {
@@ -446,11 +482,11 @@ export const makeGrantEnforcedTracer = (deps: GrantEnforcedTracerOptions) => {
 		...deps.tracerOptions,
 		executionTimeoutMs: Math.min(
 			deps.tracerOptions?.executionTimeoutMs ?? Number.POSITIVE_INFINITY,
-			deps.profile.ceilings.executionTimeoutMs,
+			profile.ceilings.executionTimeoutMs,
 		),
 		captureBytesCap: Math.min(
 			deps.tracerOptions?.captureBytesCap ?? DEFAULT_OUTPUT_CAPTURE_BYTES,
-			deps.profile.ceilings.outputBytes,
+			profile.ceilings.outputBytes,
 		),
 	};
 
@@ -484,12 +520,15 @@ export const makeGrantEnforcedTracer = (deps: GrantEnforcedTracerOptions) => {
 			if (!revokedSet.has(admission.grantId)) continue;
 			// A predefined safe profile may drain bounded; everything else is
 			// cancelled through the inner adapter as a system action.
-			if (deps.profile.drainOnRevocation) continue;
+			if (profile.drainOnRevocation) continue;
 			void Effect.runPromise(tracer.service.cancel({ executionId }, admission.subject)).catch(() => {});
 		}
 	});
 
 	const accessDenied = (subject: WorldSubject, admission: TrackedAdmission, operation: ShellOperation): boolean => {
+		// A grant never serves a subject from another session, even one that
+		// presents the admitting principal's ID.
+		if (subject.sessionId !== admission.subject.sessionId) return true;
 		const isOwner = subject.principalId === admission.principalId;
 		const grant = deps.grants.activeFor(subject.principalId);
 		if (isOwner) {
@@ -511,20 +550,29 @@ export const makeGrantEnforcedTracer = (deps: GrantEnforcedTracerOptions) => {
 	const service: ShellService = {
 		virtualExec: (request, subject) =>
 			Effect.suspend(() => {
-				if (!deps.audit.healthy() || !terminalAuditHealthy) {
+				// A throwing health probe is an outage like any other: treat it
+				// as unhealthy instead of escaping the admission path.
+				let auditHealthy = false;
+				try {
+					auditHealthy = deps.audit.healthy();
+				} catch {
+					auditHealthy = false;
+				}
+				if (!auditHealthy || !terminalAuditHealthy) {
 					return Effect.fail(unavailable("shell.virtual.exec"));
 				}
 				const grant = deps.grants.activeFor(subject.principalId);
 				if (
 					grant === undefined ||
 					!grant.operations.includes("shell.virtual.exec") ||
-					!grant.profiles.includes(deps.profile.profileId)
+					!grant.profiles.includes(profile.profileId) ||
+					grant.sessionId !== subject.sessionId
 				) {
 					return Effect.fail(admissionDenied("shell.virtual.exec"));
 				}
 				// Capacity is not an authority denial: the stable unavailable
 				// error keeps the concurrency limit out of the error channel.
-				if (tracer.pendingCount() >= deps.profile.ceilings.concurrentExecutions) {
+				if (tracer.pendingCount() >= profile.ceilings.concurrentExecutions) {
 					return Effect.fail(unavailable("shell.virtual.exec"));
 				}
 				try {
@@ -533,7 +581,7 @@ export const makeGrantEnforcedTracer = (deps: GrantEnforcedTracerOptions) => {
 					deps.audit.admit({
 						principalId: subject.principalId,
 						grantId: grant.grantId,
-						profileId: deps.profile.profileId,
+						profileId: profile.profileId,
 						policyVersion: grant.policyVersion,
 						operation: "shell.virtual.exec",
 					});

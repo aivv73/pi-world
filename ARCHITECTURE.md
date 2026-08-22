@@ -328,6 +328,13 @@ terminal size.
 scope across evaluator generations, exact child extension loading, and awaited
 session-shutdown process cleanup.
 
+The "Shell principals, grants, and mandatory audit" suite in
+`test/world-core.test.ts` owns the governance invariants of the World Shell:
+least-authority admission, component-wise attenuation denials, session-bound
+grants, frozen profiles, ceiling and concurrency enforcement, owner/ancestor
+supervision with indistinguishable refusals, revocation cascades, audit-outage
+containment, and the metadata-only privacy guarantee.
+
 `test/world-tracing.test.ts` proves privacy-safe span parentage across the
 session-owned process fiber. `test/evaluator-comparison.test.ts` extracts the
 committed `70d45e6` pi-rlm engine archive and runs the same normalized script

@@ -106,7 +106,7 @@ const WORLD_GUIDANCE = [
 	"",
 	"A live-only `world` facade is mounted beside the compatibility `rlm` and `tools` bindings. It is host-owned and must not be replaced or treated as snapshot data.",
 	"",
-	"`await world.agents.spawn(task, options?)` admits one session-owned Pi child and returns `{ id, agentId, attemptId, wait(options?), cancel() }`. Options may include `shellProfile`, naming a narrower Virtual policy profile for the child — the host proves it is a component-wise subset of your own grant or denies the spawn. `await world.agents.spawnMany(tasks)` admits every child before returning the handles. Await handle `wait()` promises directly; there is deliberately no World list/status polling API.",
+	"`await world.agents.spawn(task, options?)` admits one session-owned Pi child and returns `{ id, agentId, attemptId, wait(options?), cancel() }`. Options may include `shellProfile`, naming a narrower Virtual policy profile for the child — the host proves it is a component-wise subset of your own grant or denies the spawn. The narrowed profile is enforced at host spawn admission today; carrying the derived grant into the child's own evaluator is not built yet. Shell admission is also refused while the shell audit is unavailable. `await world.agents.spawnMany(tasks)` admits every child before returning the handles. Await handle `wait()` promises directly; there is deliberately no World list/status polling API.",
 	"",
 	"`await world.web.search(query)` runs hidden Codex web search through the host's current model/auth context. `web_run` is not a model-visible tool.",
 	"",
