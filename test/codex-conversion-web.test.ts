@@ -136,6 +136,10 @@ describe("Codex conversion Web adapter", () => {
 		});
 	});
 
+	// Worst case inside this test: a two-second ready poll, then interrupt,
+	// then up to ten seconds waiting for the native process to be reaped. The
+	// explicit budget keeps the whole path inside one test timeout even when a
+	// loaded CI runner spends seconds on process teardown.
 	test("Effect interruption reaches the package-owned native process signal", async () => {
 		const directory = tempDir();
 		const readyFile = join(directory, "ready.txt");
@@ -150,13 +154,12 @@ describe("Codex conversion Web adapter", () => {
 		expect(readFileSync(readyFile, "utf8")).toBe("ready");
 		controller.abort();
 		await expect(pending).rejects.toBeDefined();
-		// Under load the native process can take well over a second to be
-		// reaped after the interrupt, so the signal budget is generous.
 		for (let attempt = 0; attempt < 400 && !existsSync(signalFile); attempt++) {
 			await new Promise((resolve) => setTimeout(resolve, 25));
 		}
+		expect(existsSync(signalFile)).toBe(true);
 		expect(readFileSync(signalFile, "utf8")).toBe("terminated");
-	});
+	}, 30_000);
 
 	test("authority denial happens before the hidden executor is invoked", async () => {
 		let calls = 0;
