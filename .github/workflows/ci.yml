@@ -15,9 +15,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Pinned to the version development and certification run locally;
+      # floating "latest" jumped to 1.4.0 and broke the interruption contract
+      # tests within hours of release.
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.3.14
       # Avoid pi tool fallback downloads from GitHub's anonymous API.
       - run: sudo apt-get update && sudo apt-get install -y ripgrep fd-find && sudo ln -sf /usr/bin/fdfind /usr/local/bin/fd
       - run: bun install --frozen-lockfile
