@@ -226,18 +226,18 @@ This proves the capability path without pretending Host or Virtual commands
 ran; real just-bash execution and the Virtual Environment remain separate
 implementation slices.
 
-Three scope boundaries are deliberate here. Child-grant propagation ends at the
-host: attenuation is proven against the parent grant when spawn is admitted,
-but carrying the derived principal and child grant across the process boundary
-into the child's own evaluator needs a trusted transport slice, so a narrowed
-child today is constrained by the proof at admission rather than by carried
-authority inside the child process. The governed tracer owns its timers,
-records, and admission tracking, but session shutdown currently finalizes only
-the Effect runtime — a dedicated shell finalizer that cancels pending work on
-teardown belongs with the real Virtual Environment adapter, whose lifetime
-rules it will share. And revocation keeps tombstone entries in in-memory grant
-maps for the session's life: unlike execution records, they have no cap, which
-is acceptable while sessions are short-lived and worth revisiting if they grow.
+Three boundaries are deliberate. Child-grant propagation stops at the host.
+Attenuation is proven against the parent grant when spawn is admitted, but
+carrying the derived principal and child grant into the child's own evaluator
+needs a trusted transport slice, so a narrowed child today is constrained by
+that admission-time proof rather than by authority it holds inside its own
+process. The governed tracer owns its timers, records, and admission tracking,
+but session shutdown finalizes only the Effect runtime. A dedicated shell
+finalizer that cancels pending work belongs with the real Virtual Environment
+adapter, whose lifetime rules it will share. Revocation keeps tombstone entries
+in in-memory grant maps for the session's life. Unlike execution records they
+have no cap, which is acceptable while sessions stay short-lived and worth
+revisiting if they grow.
 
 ### World traces semantics, never payloads
 
